@@ -42,6 +42,15 @@ function AuthScreen() {
   const [message, setMessage] = useState(null)
   const [pendingEmail, setPendingEmail] = useState('')
 
+  function authErrorMessage(error) {
+    if (error?.status === 429 || error?.code === 'over_email_send_rate_limit') {
+      return 'Se alcanzó el límite temporal de correos. Espera unos minutos o continúa con Google.'
+    }
+    if (error?.code === 'email_not_confirmed') return 'Confirma tu correo antes de iniciar sesión.'
+    if (error?.code === 'invalid_credentials') return 'El correo o la contraseña no son correctos.'
+    return error?.message || 'No pudimos completar la solicitud. Inténtalo de nuevo.'
+  }
+
   async function submit(event) {
     event.preventDefault(); setBusy(true); setMessage(null)
     const form = new FormData(event.currentTarget)
@@ -50,7 +59,7 @@ function AuthScreen() {
     const result = mode === 'register'
       ? await supabase.auth.signUp({ email, password, options: { emailRedirectTo: getAuthRedirectUrl() } })
       : await supabase.auth.signInWithPassword({ email, password })
-    if (result.error) setMessage({ type: 'error', text: result.error.message })
+    if (result.error) setMessage({ type: 'error', text: authErrorMessage(result.error) })
     else if (mode === 'register' && !result.data.session) { setPendingEmail(email); setMessage({ type: 'success', text: 'Revisa tu correo para confirmar la cuenta.' }) }
     setBusy(false)
   }
@@ -59,8 +68,17 @@ function AuthScreen() {
     if (!pendingEmail) return
     setBusy(true); setMessage(null)
     const { error } = await supabase.auth.resend({ type: 'signup', email: pendingEmail, options: { emailRedirectTo: getAuthRedirectUrl() } })
-    setMessage(error ? { type: 'error', text: error.message } : { type: 'success', text: 'Enviamos un nuevo enlace de confirmación.' })
+    setMessage(error ? { type: 'error', text: authErrorMessage(error) } : { type: 'success', text: 'Enviamos un nuevo enlace de confirmación.' })
     setBusy(false)
+  }
+
+  async function signInWithGoogle() {
+    setBusy(true); setMessage(null)
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: { redirectTo: getAuthRedirectUrl() },
+    })
+    if (error) { setMessage({ type: 'error', text: authErrorMessage(error) }); setBusy(false) }
   }
 
   return <div className="auth-screen">
@@ -68,6 +86,10 @@ function AuthScreen() {
       <div className="auth-brand"><span className="brand-mark">L</span>Luma Workspace</div>
       <h1>{mode === 'login' ? 'Bienvenido de nuevo' : 'Crea tu espacio'}</h1>
       <p>{mode === 'login' ? 'Entra para continuar donde lo dejaste.' : 'Tus tareas, proyectos, agenda y notas sincronizados.'}</p>
+      <button type="button" className="auth-google" disabled={busy} onClick={signInWithGoogle}>
+        <GoogleMark /> Continuar con Google
+      </button>
+      <div className="auth-divider"><span>o continúa con correo</span></div>
       <form className="auth-form" onSubmit={submit}>
         <label className="field"><span>Correo</span><input name="email" type="email" autoComplete="email" required /></label>
         <label className="field"><span>Contraseña</span><input name="password" type="password" minLength="8" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required /></label>
@@ -79,6 +101,15 @@ function AuthScreen() {
     </div></section>
     <section className="auth-visual"><h2>Un lugar tranquilo para hacer avanzar tu trabajo.</h2><p>Planifica la semana, transforma ideas en tareas y mantén tus proyectos al día.</p></section>
   </div>
+}
+
+function GoogleMark() {
+  return <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18">
+    <path fill="#4285F4" d="M21.6 12.23c0-.71-.06-1.4-.18-2.06H12v3.9h5.38a4.6 4.6 0 0 1-2 3.02v2.53h3.24c1.9-1.75 2.98-4.33 2.98-7.39Z" />
+    <path fill="#34A853" d="M12 22c2.7 0 4.98-.9 6.63-2.38l-3.24-2.53c-.9.6-2.05.96-3.39.96-2.61 0-4.82-1.76-5.61-4.13H3.04v2.61A10 10 0 0 0 12 22Z" />
+    <path fill="#FBBC05" d="M6.39 13.92A6 6 0 0 1 6.07 12c0-.67.12-1.32.32-1.92V7.47H3.04A10 10 0 0 0 2 12c0 1.63.39 3.17 1.04 4.53l3.35-2.61Z" />
+    <path fill="#EA4335" d="M12 5.95c1.47 0 2.79.5 3.82 1.49l2.88-2.88A9.65 9.65 0 0 0 12 2a10 10 0 0 0-8.96 5.47l3.35 2.61C7.18 7.71 9.39 5.95 12 5.95Z" />
+  </svg>
 }
 
 function Workspace({ session }) {
@@ -704,3 +735,4 @@ function escapeXml(value = '') { return String(value).replace(/[<>&"']/g, (chara
 function formatBytes(bytes) { if (!bytes) return '0 B'; const units = ['B', 'KB', 'MB', 'GB']; const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1); return `${(bytes / (1024 ** index)).toFixed(index ? 1 : 0)} ${units[index]}` }
 function escapeHtml(text = '') { return String(text).replace(/[&<>"]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[character]) }
 function sanitizeRich(html = '') { const template = document.createElement('template'); template.innerHTML = html; const allowed = new Set(['B', 'STRONG', 'I', 'EM', 'U', 'A', 'BR', 'DIV', 'P', 'SPAN']); [...template.content.querySelectorAll('*')].reverse().forEach((element) => { if (!allowed.has(element.tagName)) { element.replaceWith(document.createTextNode(element.textContent || '')); return } [...element.attributes].forEach((attribute) => { if (element.tagName === 'A' && attribute.name === 'href' && /^https?:\/\//i.test(attribute.value)) return; element.removeAttribute(attribute.name) }); if (element.tagName === 'A' && element.hasAttribute('href')) { element.target = '_blank'; element.rel = 'noopener' } }); return template.innerHTML }
+
