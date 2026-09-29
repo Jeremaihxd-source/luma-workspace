@@ -40,6 +40,7 @@ function AuthScreen() {
   const [mode, setMode] = useState('login')
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState(null)
+  const [pendingEmail, setPendingEmail] = useState('')
 
   async function submit(event) {
     event.preventDefault(); setBusy(true); setMessage(null)
@@ -50,7 +51,15 @@ function AuthScreen() {
       ? await supabase.auth.signUp({ email, password, options: { emailRedirectTo: getAuthRedirectUrl() } })
       : await supabase.auth.signInWithPassword({ email, password })
     if (result.error) setMessage({ type: 'error', text: result.error.message })
-    else if (mode === 'register' && !result.data.session) setMessage({ type: 'success', text: 'Revisa tu correo para confirmar la cuenta.' })
+    else if (mode === 'register' && !result.data.session) { setPendingEmail(email); setMessage({ type: 'success', text: 'Revisa tu correo para confirmar la cuenta.' }) }
+    setBusy(false)
+  }
+
+  async function resendConfirmation() {
+    if (!pendingEmail) return
+    setBusy(true); setMessage(null)
+    const { error } = await supabase.auth.resend({ type: 'signup', email: pendingEmail, options: { emailRedirectTo: getAuthRedirectUrl() } })
+    setMessage(error ? { type: 'error', text: error.message } : { type: 'success', text: 'Enviamos un nuevo enlace de confirmación.' })
     setBusy(false)
   }
 
@@ -63,9 +72,10 @@ function AuthScreen() {
         <label className="field"><span>Correo</span><input name="email" type="email" autoComplete="email" required /></label>
         <label className="field"><span>Contraseña</span><input name="password" type="password" minLength="8" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required /></label>
         {message && <div className={message.type === 'error' ? 'auth-error' : 'auth-success'}>{message.text}</div>}
+        {mode === 'register' && pendingEmail && <button type="button" className="auth-resend" disabled={busy} onClick={resendConfirmation}>Reenviar correo de confirmación</button>}
         <button className="primary" disabled={busy}>{busy ? 'Espera…' : mode === 'login' ? 'Entrar' : 'Crear cuenta'}</button>
       </form>
-      <div className="auth-switch">{mode === 'login' ? '¿Aún no tienes cuenta?' : '¿Ya tienes cuenta?'} <button onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setMessage(null) }}>{mode === 'login' ? 'Regístrate' : 'Inicia sesión'}</button></div>
+      <div className="auth-switch">{mode === 'login' ? '¿Aún no tienes cuenta?' : '¿Ya tienes cuenta?'} <button onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setMessage(null); setPendingEmail('') }}>{mode === 'login' ? 'Regístrate' : 'Inicia sesión'}</button></div>
     </div></section>
     <section className="auth-visual"><h2>Un lugar tranquilo para hacer avanzar tu trabajo.</h2><p>Planifica la semana, transforma ideas en tareas y mantén tus proyectos al día.</p></section>
   </div>
