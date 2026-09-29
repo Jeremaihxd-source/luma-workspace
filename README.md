@@ -22,7 +22,8 @@ pnpm dev
 1. Crea o conecta un proyecto de Supabase.
 2. Ejecuta, en orden, todas las migraciones de `supabase/migrations`.
 3. Copia `.env.example` a `.env.local` y completa la URL del proyecto y la clave pública `anon`.
-4. Añade la URL publicada de la aplicación a las URL permitidas de Supabase Auth.
+4. Define `VITE_APP_URL` con el dominio público final, sin rutas adicionales.
+5. En Supabase Auth → URL Configuration, usa ese mismo dominio como **Site URL** y añádelo a **Redirect URLs** con `/**`.
 
 Todas las tablas colaborativas y el almacenamiento utilizan Row Level Security para que cada usuario solo acceda a los espacios donde es miembro.
 
@@ -33,7 +34,3 @@ pnpm build
 ```
 
 El resultado se genera en `build/`.
-
-## Despliegue
-
-El proyecto está preparado para desplegarse en Vercel desde la rama `main`.
