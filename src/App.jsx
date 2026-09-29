@@ -6,7 +6,7 @@ import {
   Link2, LogOut, Menu, MoreHorizontal, PenTool, Plus, Search, Settings,
   MousePointer2, Share2, StickyNote, Trash2, Type, Underline, Unlink, Upload, Users, X,
 } from 'lucide-react'
-import { supabase, supabaseConfigured } from './lib/supabase'
+import { getAuthRedirectUrl, supabase, supabaseConfigured } from './lib/supabase'
 import { layoutCalendarEvents } from './calendarLayout'
 import { COLORS, DAYS, initialWorkspace, iso, localDateKey, migrateWorkspace, uid } from './state'
 
@@ -47,7 +47,7 @@ function AuthScreen() {
     const email = String(form.get('email')).trim()
     const password = String(form.get('password'))
     const result = mode === 'register'
-      ? await supabase.auth.signUp({ email, password, options: { emailRedirectTo: window.location.origin } })
+      ? await supabase.auth.signUp({ email, password, options: { emailRedirectTo: getAuthRedirectUrl() } })
       : await supabase.auth.signInWithPassword({ email, password })
     if (result.error) setMessage({ type: 'error', text: result.error.message })
     else if (mode === 'register' && !result.data.session) setMessage({ type: 'success', text: 'Revisa tu correo para confirmar la cuenta.' })
