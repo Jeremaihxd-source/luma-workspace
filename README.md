@@ -33,3 +33,7 @@ pnpm build
 ```
 
 El resultado se genera en `build/`.
+
+## Despliegue
+
+El proyecto está preparado para desplegarse en Vercel desde la rama `main`.
