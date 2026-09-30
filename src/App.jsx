@@ -23,6 +23,9 @@ const colorNames = { blue: 'Azul', purple: 'Violeta', orange: 'Naranja', green: 
 
 export default function App() {
   const [session, setSession] = useState(undefined)
+  const legalPage = window.location.pathname === '/privacidad'
+    ? 'privacy'
+    : window.location.pathname === '/terminos' ? 'terms' : null
 
   useEffect(() => {
     if (!supabaseConfigured) { setSession(null); return }
@@ -31,6 +34,7 @@ export default function App() {
     return () => listener.subscription.unsubscribe()
   }, [])
 
+  if (legalPage) return <LegalPage type={legalPage} />
   if (session === undefined) return <LoadingScreen label="Abriendo tu espacio…" />
   if (supabaseConfigured && !session) return <AuthScreen />
   return <Workspace session={session} />
@@ -98,9 +102,40 @@ function AuthScreen() {
         <button className="primary" disabled={busy}>{busy ? 'Espera…' : mode === 'login' ? 'Entrar' : 'Crear cuenta'}</button>
       </form>
       <div className="auth-switch">{mode === 'login' ? '¿Aún no tienes cuenta?' : '¿Ya tienes cuenta?'} <button onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setMessage(null); setPendingEmail('') }}>{mode === 'login' ? 'Regístrate' : 'Inicia sesión'}</button></div>
+      <nav className="auth-legal" aria-label="Información legal">
+        <a href="/privacidad">Privacidad</a><span>·</span><a href="/terminos">Términos</a>
+      </nav>
     </div></section>
     <section className="auth-visual"><h2>Un lugar tranquilo para hacer avanzar tu trabajo.</h2><p>Planifica la semana, transforma ideas en tareas y mantén tus proyectos al día.</p></section>
   </div>
+}
+
+function LegalPage({ type }) {
+  const privacy = type === 'privacy'
+  return <main className="legal-page">
+    <article className="legal-card">
+      <a className="legal-brand" href="/"><span className="brand-mark">L</span>Luma Workspace</a>
+      <p className="legal-kicker">Información legal</p>
+      <h1>{privacy ? 'Política de privacidad' : 'Condiciones del servicio'}</h1>
+      <p className="legal-updated">Última actualización: 29 de septiembre de 2026</p>
+      {privacy ? <>
+        <section><h2>Qué información tratamos</h2><p>Cuando creas una cuenta podemos tratar tu nombre, correo electrónico, identificador de usuario y foto de perfil. También guardamos el contenido que decides crear en Luma Workspace, como tareas, proyectos, notas, eventos, archivos y espacios compartidos.</p></section>
+        <section><h2>Cómo usamos la información</h2><p>La utilizamos únicamente para autenticarte, sincronizar tu espacio de trabajo, habilitar la colaboración, mantener la seguridad y mejorar el funcionamiento del servicio. No vendemos tus datos personales.</p></section>
+        <section><h2>Proveedores y almacenamiento</h2><p>La autenticación y la base de datos se gestionan mediante Supabase. Si eliges “Continuar con Google”, Google comparte con nosotros los datos básicos de perfil que autorices. Esos proveedores pueden procesar datos de acuerdo con sus propias políticas y medidas de seguridad.</p></section>
+        <section><h2>Compartir y conservar</h2><p>El contenido de un espacio colaborativo es visible para sus miembros. Conservamos la información mientras tu cuenta o espacio permanezca activo y durante el tiempo razonablemente necesario para seguridad, copias de respaldo u obligaciones legales.</p></section>
+        <section><h2>Tus opciones</h2><p>Puedes dejar de usar el servicio, cerrar sesión o solicitar acceso, corrección o eliminación de tus datos. También puedes revocar el acceso de Google desde la configuración de tu cuenta de Google.</p></section>
+        <section><h2>Contacto</h2><p>Para preguntas de privacidad o solicitudes relacionadas con tus datos, escribe a <a href="mailto:zevallosronald836@gmail.com">zevallosronald836@gmail.com</a>.</p></section>
+      </> : <>
+        <section><h2>Uso del servicio</h2><p>Luma Workspace ofrece herramientas de productividad y colaboración. Debes usar el servicio de forma legal, proteger el acceso a tu cuenta y mantener información correcta al registrarte.</p></section>
+        <section><h2>Tu contenido</h2><p>Conservas la titularidad de lo que creas. Nos autorizas a almacenar y procesar ese contenido únicamente para operar, sincronizar y mostrar el servicio a ti y a los miembros de los espacios con quienes lo compartas.</p></section>
+        <section><h2>Colaboración</h2><p>Al invitar personas a un espacio, eres responsable de contar con autorización para compartir su información y el contenido correspondiente. Los miembros pueden ver o modificar los recursos según los permisos disponibles.</p></section>
+        <section><h2>Conductas no permitidas</h2><p>No puedes intentar vulnerar el servicio, acceder a cuentas ajenas, distribuir contenido ilegal o dañino, ni utilizar la plataforma para abusar de otras personas o infringir sus derechos.</p></section>
+        <section><h2>Disponibilidad y cambios</h2><p>El servicio se proporciona según disponibilidad y puede evolucionar. Procuraremos mantenerlo seguro y funcional, pero no garantizamos que esté libre de interrupciones. Los cambios importantes de estas condiciones se indicarán actualizando esta página.</p></section>
+        <section><h2>Contacto</h2><p>Si tienes preguntas sobre estas condiciones, escribe a <a href="mailto:zevallosronald836@gmail.com">zevallosronald836@gmail.com</a>.</p></section>
+      </>}
+      <footer><a href="/">Volver a Luma Workspace</a><span>·</span><a href={privacy ? '/terminos' : '/privacidad'}>{privacy ? 'Condiciones del servicio' : 'Política de privacidad'}</a></footer>
+    </article>
+  </main>
 }
 
 function GoogleMark() {
