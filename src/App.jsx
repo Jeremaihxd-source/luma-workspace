@@ -159,6 +159,8 @@ function Workspace({ session }) {
   const [searchOpen, setSearchOpen] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
   const [pagesOpen, setPagesOpen] = useState(true)
+  const [sidebarOpen, setSidebarOpen] = useState(() => localStorage.getItem('luma-sidebar-open') !== 'false')
+  const [sidebarWidth, setSidebarWidth] = useState(() => clamp(Number(localStorage.getItem('luma-sidebar-width')) || 260, 220, 380))
   const saveTimer = useRef(null)
   const hydrated = useRef(false)
   const skipNextSave = useRef(false)
@@ -255,6 +257,14 @@ function Workspace({ session }) {
   }
 
   const go = (next) => { setView(next); localStorage.setItem('luma-react-view', next); setMobileOpen(false) }
+  const toggleSidebar = () => setSidebarOpen((value) => { localStorage.setItem('luma-sidebar-open', String(!value)); return !value })
+  const resizeSidebar = (event) => {
+    event.preventDefault()
+    const startX = event.clientX; const startWidth = sidebarWidth
+    const move = (pointer) => setSidebarWidth(clamp(startWidth + pointer.clientX - startX, 220, 380))
+    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); setSidebarWidth((value) => { localStorage.setItem('luma-sidebar-width', String(value)); return value }) }
+    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up, { once: true })
+  }
   if (!workspace) return <LoadingScreen label="Cargando tus datos…" />
 
   const pending = workspace.tasks.filter((task) => !task.done).length
@@ -288,9 +298,9 @@ function Workspace({ session }) {
     { icon: Settings, label: 'Ajustes y cuenta', onSelect: () => setModal({ type: 'settings' }) },
   ]
 
-  return <div className={`shell ${view === 'ideas' ? 'idea-mode' : ''}`}>
+  return <div className={`shell ${view === 'ideas' ? 'idea-mode' : ''} ${sidebarOpen ? '' : 'sidebar-closed'}`} style={{ '--sidebar-width': `${sidebarWidth}px` }}>
     <aside className={`sidebar ${mobileOpen ? 'open' : ''}`}>
-      <div className="brand"><span className="brand-mark">L</span><div>Luma<small>Workspace</small></div></div>
+      <div className="brand"><span className="brand-mark">L</span><div>Luma<small>Workspace</small></div><button className="sidebar-close" onClick={toggleSidebar} title="Ocultar menú" aria-label="Ocultar menú lateral"><ChevronLeft size={17}/></button></div>
       <div className="space-switcher compact"><select aria-label="Espacio de trabajo" value={activeSpaceId || ''} onChange={(e) => selectSpace(e.target.value)}>{spaces.map((space) => <option value={space.id} key={space.id}>{space.name}</option>)}</select><ActionMenu ariaLabel="Opciones del espacio" trigger={<MoreHorizontal size={17}/>} items={workspaceActions}/></div>
       <div className="quick"><ActionMenu className="create-menu" trigger={<><Plus size={16}/> Crear <ChevronDown size={14}/></>} items={createActions}/><button className="square" aria-label="Buscar en el espacio" title="Buscar" onClick={() => setSearchOpen(true)}><Search size={18}/></button></div>
       <div className="sidebar-nav-scroll">{navGroups.map((group) => <section className="nav-group" key={group.label}><div className="nav-label">{group.label}</div><nav className="nav">{group.ids.map((id) => { const [, Icon, label] = navItems.find((item) => item[0] === id); return <button key={id} className={`nav-btn ${view === id ? 'active' : ''}`} onClick={() => go(id)}><Icon size={17}/>{label}{id === 'tasks' && pending > 0 && <span className="nav-count">{pending}</span>}</button> })}</nav></section>)}
@@ -298,10 +308,11 @@ function Workspace({ session }) {
         {pagesOpen && <nav className="nav page-nav">{workspace.pages.map((page) => <button key={page.id} className={`nav-btn ${view === `page:${page.id}` ? 'active' : ''}`} onClick={() => go(`page:${page.id}`)}><span className="page-icon">{page.icon || '📄'}</span><span className="page-nav-title">{page.title || 'Sin título'}</span></button>)}</nav>}
       </div>
       <div className="sidebar-foot"><button className={`nav-btn ${view === 'trash' ? 'active' : ''}`} onClick={() => go('trash')}><Trash2 size={17}/>Papelera{workspace.trash.length > 0 && <span className="nav-count">{workspace.trash.length}</span>}</button><div className="account-summary"><span>{session.user.email?.slice(0, 1).toUpperCase()}</span><div><strong>{session.user.email?.split('@')[0]}</strong><small>{activeSpace?.role === 'owner' ? 'Propietario' : activeSpace?.role === 'editor' ? 'Editor' : 'Lector'}</small></div></div></div>
+      <div className="sidebar-resizer" role="separator" aria-label="Cambiar ancho del menú" aria-orientation="vertical" onPointerDown={resizeSidebar}/>
     </aside>
     <div className={`mobile-backdrop ${mobileOpen ? 'open' : ''}`} onClick={() => setMobileOpen(false)} />
     <main className="main">
-      <header className="topbar"><button className="ghost mobile-menu" onClick={() => setMobileOpen(true)}><Menu size={18}/></button><div className="topbar-title"><span className="page-name">{currentPage ? `${currentPage.icon || '📄'} ${currentPage.title || 'Sin título'}` : viewTitle(view)}</span><span>{activeSpace?.name}</span></div><div className="top-actions"><SyncStatus state={syncState}/><button className={`ghost calendar-top ${view === 'agenda' && agendaMode === 'calendar' ? 'active' : ''}`} onClick={() => { go('agenda'); setAgendaMode(agendaMode === 'calendar' && view === 'agenda' ? 'schedule' : 'calendar') }}><CalendarDays size={15}/> {view === 'agenda' && agendaMode === 'calendar' ? 'Horario' : 'Calendario'}</button><button className="square top-search" aria-label="Buscar" title="Buscar" onClick={() => setSearchOpen(true)}><Search size={17}/></button>{canEdit && <ActionMenu align="right" className="top-create" trigger={<><Plus size={16}/> Crear <ChevronDown size={14}/></>} items={createActions}/>}<ActionMenu align="right" ariaLabel="Más opciones" trigger={<MoreHorizontal size={18}/>} items={[{ icon: Share2, label: 'Compartir espacio', onSelect: () => setModal({ type: 'share' }) }, { icon: Settings, label: 'Ajustes', onSelect: () => setModal({ type: 'settings' }) }]}/></div></header>
+      <header className="topbar"><button className="ghost mobile-menu" onClick={() => setMobileOpen(true)}><Menu size={18}/></button>{!sidebarOpen && <button className="sidebar-reopen" onClick={toggleSidebar} title="Mostrar menú" aria-label="Mostrar menú lateral"><Menu size={18}/></button>}<div className="topbar-title"><span className="page-name">{currentPage ? `${currentPage.icon || '📄'} ${currentPage.title || 'Sin título'}` : viewTitle(view)}</span><span>{activeSpace?.name}</span></div><div className="top-actions"><SyncStatus state={syncState}/><button className={`ghost calendar-top ${view === 'agenda' && agendaMode === 'calendar' ? 'active' : ''}`} onClick={() => { go('agenda'); setAgendaMode(agendaMode === 'calendar' && view === 'agenda' ? 'schedule' : 'calendar') }}><CalendarDays size={15}/> {view === 'agenda' && agendaMode === 'calendar' ? 'Horario' : 'Calendario'}</button><button className="square top-search" aria-label="Buscar" title="Buscar" onClick={() => setSearchOpen(true)}><Search size={17}/></button>{canEdit && <ActionMenu align="right" className="top-create" trigger={<><Plus size={16}/> Crear <ChevronDown size={14}/></>} items={createActions}/>}<ActionMenu align="right" ariaLabel="Más opciones" trigger={<MoreHorizontal size={18}/>} items={[{ icon: Share2, label: 'Compartir espacio', onSelect: () => setModal({ type: 'share' }) }, { icon: Settings, label: 'Ajustes', onSelect: () => setModal({ type: 'settings' }) }]}/></div></header>
       <div className="content">
         {!supabaseConfigured && <div className="notice-banner">Modo local activo. Conecta Supabase para habilitar cuentas y sincronización entre dispositivos.</div>}
         {view === 'home' && <Dashboard workspace={workspace} go={go} update={update}/>} 
@@ -342,10 +353,10 @@ function viewTitle(view) { return { home: 'Inicio', agenda: 'Agenda y calendario
 function openContextModal(view, setModal) { if (view === 'agenda') setModal({ type: 'event' }); else if (view === 'projects') setModal({ type: 'project' }); else if (view === 'notes') setModal({ type: 'noteBlock' }); else setModal({ type: 'task' }) }
 
 function Dashboard({ workspace, go, update }) {
-  const todo = workspace.tasks.filter((task) => !task.done)
+  const todo = workspace.tasks.filter((task) => !task.done).sort((a, b) => (a.date || '9999-12-31').localeCompare(b.date || '9999-12-31'))
   const upcoming = [...workspace.events].filter((event) => event.date >= localDateKey(new Date())).sort((a, b) => a.date.localeCompare(b.date) || a.start - b.start).slice(0, 4)
   const progress = workspace.projects.length ? Math.round(workspace.projects.reduce((sum, project) => sum + projectStats(project, workspace.tasks).progress, 0) / workspace.projects.length) : 0
-  return <><ViewHead eyebrow="Resumen" title="Hoy" subtitle="Empieza por lo importante y abre los detalles solo cuando los necesites." action={<button className="ghost" onClick={() => go('agenda')}>Abrir agenda <ChevronRight size={15}/></button>}/><div className="metrics"><Metric value={todo.length} label="pendientes"/><Metric value={upcoming.length} label="próximos bloques"/><Metric value={`${progress}%`} label="progreso"/></div><div className="dashboard-grid"><section className="panel"><h2>Siguientes tareas</h2><div className="list">{todo.slice(0, 5).map((task) => <label className="list-row" key={task.id}><input className="check" type="checkbox" checked={task.done} onChange={(e) => update((draft) => { draft.tasks.find((x) => x.id === task.id).done = e.target.checked; return draft })}/><span>{task.title}</span><Priority value={task.priority}/></label>)}{!todo.length && <Empty text="No tienes tareas pendientes."/>}</div></section><section className="panel"><h2>Próximos bloques</h2><div className="list">{upcoming.map((event) => <button className="list-row result" key={event.id} onClick={() => go('agenda')}><span>{formatTinyDate(parseDate(event.date))}</span><div><strong>{event.title}</strong><div className="top-date">{clock(event.start)} · {event.duration} min</div></div><ChevronRight size={16}/></button>)}{!upcoming.length && <Empty text="No hay bloques próximos."/>}</div></section></div></>
+  return <><ViewHead eyebrow="Resumen" title="Hoy" subtitle="Primero, termina lo que tienes pendiente. El resto queda a mano sin distraerte." action={<button className="ghost" onClick={() => go('agenda')}>Abrir agenda <ChevronRight size={15}/></button>}/><div className="dashboard-focus"><section className="panel pending-panel"><div className="panel-heading"><div><span>Prioridad de hoy</span><h2>Siguientes tareas</h2></div><button className="ghost" onClick={() => go('tasks')}>Ver todas <ChevronRight size={14}/></button></div><div className="list">{todo.slice(0, 7).map((task) => <label className="list-row" key={task.id}><input className="check" type="checkbox" checked={task.done} onChange={(e) => update((draft) => { draft.tasks.find((x) => x.id === task.id).done = e.target.checked; return draft })}/><span>{task.title}<small>{task.date ? formatTinyDate(parseDate(task.date)) : 'Sin fecha'}</small></span><Priority value={task.priority}/></label>)}{!todo.length && <Empty text="No tienes tareas pendientes."/>}</div></section><aside className="dashboard-overview"><div className="metrics"><Metric value={todo.length} label="pendientes"/><Metric value={upcoming.length} label="próximos bloques"/><Metric value={`${progress}%`} label="progreso"/></div><section className="panel upcoming-panel"><h2>Próximos bloques</h2><div className="list">{upcoming.map((event) => <button className="list-row result" key={event.id} onClick={() => go('agenda')}><span>{formatTinyDate(parseDate(event.date))}</span><div><strong>{event.title}</strong><div className="top-date">{clock(event.start)} · {event.duration} min</div></div><ChevronRight size={16}/></button>)}{!upcoming.length && <Empty text="No hay bloques próximos."/>}</div></section></aside></div></>
 }
 function Metric({ value, label }) { return <div className="metric"><strong>{value}</strong><span>{label}</span></div> }
 function ViewHead({ eyebrow, title, subtitle, action }) { return <div className="view-head"><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1>{subtitle && <p>{subtitle}</p>}</div>{action}</div> }
@@ -437,7 +448,6 @@ function IdeasBoard({ workspace, update, go, syncState, setModal }) {
   const [selectedId, setSelectedId] = useState(null)
   const [connectFrom, setConnectFrom] = useState(null)
   const [zoom, setZoom] = useState(0.85)
-  const [inspectorOpen, setInspectorOpen] = useState(true)
   const [tool, setTool] = useState('select')
   const [snap, setSnap] = useState(true)
   const viewport = useRef(null)
@@ -452,7 +462,7 @@ function IdeasBoard({ workspace, update, go, syncState, setModal }) {
     const y = position?.y ?? Math.round((view.scrollTop + view.clientHeight / 2) / zoom - 90)
     const node = { id: uid(), type, x: Math.max(20, x), y: Math.max(20, y), width: type === 'image' ? 340 : 280, height: type === 'image' ? 250 : 180, title: type === 'image' ? 'Referencia visual' : type === 'text' ? 'Texto' : 'Nueva idea', content: type === 'text' ? 'Escribe aquí…' : '', url, color: type === 'note' ? 'yellow' : 'blue', taskIds: [], projectIds: [] }
     update((draft) => { draft.ideaBoard.nodes.push(node); return draft })
-    setSelectedId(node.id); setInspectorOpen(true)
+    setSelectedId(node.id)
   }, [update, zoom])
 
   const chooseNode = (node) => {
@@ -465,13 +475,27 @@ function IdeasBoard({ workspace, update, go, syncState, setModal }) {
 
   const dragNode = (event, node) => {
     if (tool === 'hand') return
-    if (event.target.closest('button,input,textarea,select')) return
+    if (event.target.closest('button,input,textarea,select,[data-node-resize]')) return
     event.preventDefault(); chooseNode(node)
     const element = event.currentTarget
     const origin = { x: event.clientX, y: event.clientY, left: node.x, top: node.y }
     let nextX = node.x; let nextY = node.y
     const move = (pointer) => { nextX = Math.max(0, origin.left + (pointer.clientX - origin.x) / zoom); nextY = Math.max(0, origin.top + (pointer.clientY - origin.y) / zoom); element.style.left = `${nextX}px`; element.style.top = `${nextY}px` }
     const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); update((draft) => { const target = draft.ideaBoard.nodes.find((item) => item.id === node.id); if (target) { target.x = snap ? Math.round(nextX / 10) * 10 : Math.round(nextX); target.y = snap ? Math.round(nextY / 10) * 10 : Math.round(nextY) } return draft }) }
+    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up, { once: true })
+  }
+
+  const resizeNode = (event, node) => {
+    event.preventDefault(); event.stopPropagation(); setSelectedId(node.id)
+    const element = event.currentTarget.closest('.idea-node')
+    const origin = { x: event.clientX, y: event.clientY, width: node.width, height: node.height }
+    let width = node.width; let height = node.height
+    const move = (pointer) => {
+      width = clamp(origin.width + (pointer.clientX - origin.x) / zoom, 190, 760)
+      height = clamp(origin.height + (pointer.clientY - origin.y) / zoom, 120, 620)
+      element.style.width = `${width}px`; element.style.height = `${height}px`
+    }
+    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); update((draft) => { const target = draft.ideaBoard.nodes.find((item) => item.id === node.id); if (target) { target.width = Math.round(width); target.height = Math.round(height) } return draft }) }
     window.addEventListener('pointermove', move); window.addEventListener('pointerup', up, { once: true })
   }
 
@@ -490,6 +514,11 @@ function IdeasBoard({ workspace, update, go, syncState, setModal }) {
     update((draft) => { draft.ideaBoard.nodes.push(copy); return draft }); setSelectedId(copy.id)
   }, [board.nodes, selectedId, update])
   const clearConnections = () => update((draft) => { draft.ideaBoard.connections = draft.ideaBoard.connections.filter((line) => line.from !== selectedId && line.to !== selectedId); return draft })
+  const changeImageUrl = (node) => {
+    const url = prompt('Pega la URL pública de la imagen:', node.url || 'https://')
+    if (url === null || !/^https?:\/\//i.test(url)) return
+    update((draft) => { const target = draft.ideaBoard.nodes.find((item) => item.id === node.id); if (target) target.url = url; return draft })
+  }
   const centerBoard = useCallback(() => {
     const view = viewport.current
     if (!view) return
@@ -547,19 +576,17 @@ function IdeasBoard({ workspace, update, go, syncState, setModal }) {
       <div className="studio-status"><i className={syncState === 'error' ? 'error' : ''}/><span>{syncedLabel}</span></div>
       <div className="studio-actions"><ActionMenu className="studio-add" align="right" trigger={<><Plus size={16}/> Añadir <ChevronDown size={14}/></>} items={addItems}/><button className={`studio-tool ${connectFrom ? 'active' : ''}`} disabled={!selectedId} onClick={() => setConnectFrom(connectFrom ? null : selectedId)}><Link2 size={16}/><span>{connectFrom ? 'Cancelar conexión' : 'Conectar'}</span></button><ActionMenu align="right" ariaLabel="Más herramientas" trigger={<MoreHorizontal size={18}/>} items={[{ icon: Copy, label: 'Duplicar selección', onSelect: duplicateNode }, { icon: Download, label: 'Exportar como SVG', onSelect: exportBoard }, { icon: Trash2, label: 'Eliminar selección', danger: true, onSelect: removeNode }]}/><button className="studio-share" onClick={() => setModal({ type: 'share' })}><Users size={16}/> Equipo</button></div>
     </header>
-    <div className={`studio-workspace ${inspectorOpen ? 'with-inspector' : ''}`}>
+    <div className="studio-workspace">
       <div className="studio-rail"><button className={tool === 'select' ? 'active' : ''} title="Seleccionar (V)" onClick={() => setTool('select')}><MousePointer2 size={18}/></button><button className={tool === 'hand' ? 'active' : ''} title="Mover lienzo (H)" onClick={() => setTool('hand')}><Hand size={18}/></button><span/><ActionMenu className="rail-add" trigger={<Plus size={19}/>} ariaLabel="Añadir al lienzo" items={addItems}/><button title="Nota (N)" onClick={() => addNode('note')}><StickyNote size={18}/></button><button title="Texto (T)" onClick={() => addNode('text')}><Type size={18}/></button><button title="Imagen" onClick={() => addNode('image')}><ImageIcon size={18}/></button><span/><button className={snap ? 'active' : ''} title="Ajustar a cuadrícula" onClick={() => setSnap((value) => !value)}><Grid3X3 size={18}/></button><button title="Centrar tablero" onClick={centerBoard}><PenTool size={18}/></button></div>
       <div className="studio-viewport" ref={viewport} onPointerDown={(event) => { if (event.target === event.currentTarget || event.target.classList.contains('studio-stage')) { setSelectedId(null); setConnectFrom(null) } }}>
         <div className="studio-stage" style={{ transform: `scale(${zoom})` }} onDoubleClick={(event) => { if (event.target !== event.currentTarget) return; const rect = event.currentTarget.getBoundingClientRect(); addNode('note', { x: (event.clientX - rect.left) / zoom, y: (event.clientY - rect.top) / zoom }) }}>
           <svg className="idea-lines" viewBox="0 0 2200 1400">{board.connections.map((line) => { const from = board.nodes.find((node) => node.id === line.from); const to = board.nodes.find((node) => node.id === line.to); if (!from || !to) return null; return <path key={line.id} d={`M ${from.x + from.width / 2} ${from.y + from.height / 2} C ${from.x + from.width / 2 + 120} ${from.y + from.height / 2}, ${to.x + to.width / 2 - 120} ${to.y + to.height / 2}, ${to.x + to.width / 2} ${to.y + to.height / 2}`}/> })}</svg>
-          {board.nodes.map((node) => <article key={node.id} className={`idea-node ${node.type} ${selectedId === node.id ? 'selected' : ''} ${connectFrom === node.id ? 'connecting' : ''}`} style={{ left: node.x, top: node.y, width: node.width, height: node.height }} onPointerDown={(event) => dragNode(event, node)} onClick={(event) => { event.stopPropagation(); chooseNode(node) }}><div className="node-grip"><GripVertical size={14}/></div>{node.type === 'image' && <img src={node.url} alt=""/>}<div className="idea-node-body"><strong>{node.title}</strong>{node.content && <p>{node.content}</p>}</div>{(node.taskIds.length > 0 || node.projectIds.length > 0) && <div className="idea-links"><CheckSquare size={12}/>{node.taskIds.length}<FolderKanban size={12}/>{node.projectIds.length}</div>}</article>)}
+          {board.nodes.map((node) => { const isSelected = selectedId === node.id; return <article key={node.id} className={`idea-node ${node.type} ${isSelected ? 'selected' : ''} ${connectFrom === node.id ? 'connecting' : ''}`} style={{ left: node.x, top: node.y, width: node.width, height: node.height }} onPointerDown={(event) => dragNode(event, node)} onClick={(event) => { event.stopPropagation(); chooseNode(node) }}><div className="node-grip"><GripVertical size={14}/></div>{node.type === 'image' && <img src={node.url} alt="" onDoubleClick={() => changeImageUrl(node)}/>}<div className="idea-node-body">{isSelected ? <><input className="node-title-input" aria-label="Título del elemento" value={node.title} onChange={(event) => patchNode({ title: event.target.value })}/><textarea className="node-content-input" aria-label="Contenido del elemento" value={node.content || ''} placeholder="Escribe aquí…" onChange={(event) => patchNode({ content: event.target.value })}/></> : <><strong>{node.title}</strong>{node.content && <p>{node.content}</p>}</>}</div>{isSelected && <div className="node-context-actions"><button title="Duplicar" onClick={duplicateNode}><Copy size={14}/></button>{node.type === 'image' && <button title="Cambiar imagen por enlace" onClick={() => changeImageUrl(node)}><ImageIcon size={14}/></button>}<details className="node-relations"><summary title="Conectar con tareas y proyectos"><Link2 size={14}/></summary><div className="node-relations-menu"><strong>Conectar con el trabajo</strong>{workspace.tasks.length > 0 && <small>Tareas</small>}{workspace.tasks.map((task) => <label key={task.id}><input type="checkbox" checked={node.taskIds.includes(task.id)} onChange={() => toggleRelation('taskIds', task.id)}/><span className={task.done ? 'done' : ''}>{task.title}</span></label>)}{workspace.projects.length > 0 && <small>Proyectos</small>}{workspace.projects.map((project) => <label key={project.id}><input type="checkbox" checked={node.projectIds.includes(project.id)} onChange={() => toggleRelation('projectIds', project.id)}/><span>{project.symbol} {project.name}</span></label>)}{board.connections.some((line) => line.from === node.id || line.to === node.id) && <button className="clear-node-links" onClick={clearConnections}><Unlink size={13}/> Quitar líneas</button>}</div></details><button className={connectFrom === node.id ? 'active' : ''} title="Conectar visualmente" onClick={() => setConnectFrom(connectFrom ? null : node.id)}><LinkIcon size={14}/></button><button className="danger" title="Eliminar" onClick={removeNode}><Trash2 size={14}/></button></div>}<div className="node-resize-handle" data-node-resize title="Arrastra para cambiar el tamaño" onPointerDown={(event) => resizeNode(event, node)}/>{(node.taskIds.length > 0 || node.projectIds.length > 0) && <div className="idea-links"><CheckSquare size={12}/>{node.taskIds.length}<FolderKanban size={12}/>{node.projectIds.length}</div>}</article> })}
           {!board.nodes.length && <button className="studio-empty" onClick={() => addNode('note')}><Plus size={22}/><strong>Crea la primera idea</strong><span>También puedes hacer doble clic en cualquier parte.</span></button>}
         </div>
         <div className="studio-help">V seleccionar · H desplazar · N nota · T texto · Ctrl/⌘ + rueda: zoom</div>
         <div className="zoom-controls"><button aria-label="Alejar" onClick={() => setZoom((value) => clamp(value - .1, .4, 1.4))}>−</button><button className="zoom-value" onClick={centerBoard}>{Math.round(zoom * 100)}%</button><button aria-label="Acercar" onClick={() => setZoom((value) => clamp(value + .1, .4, 1.4))}>＋</button></div>
       </div>
-      {inspectorOpen && <aside className="studio-inspector">{selected ? <><div className="inspector-head"><div><small>Selección</small><strong>Propiedades</strong></div><button className="icon-action" onClick={() => setInspectorOpen(false)} aria-label="Cerrar inspector"><X size={16}/></button></div><Field label="Título"><input value={selected.title} onChange={(e) => patchNode({ title: e.target.value })}/></Field>{selected.type === 'image' && <Field label="Imagen"><input value={selected.url || ''} onChange={(e) => patchNode({ url: e.target.value })}/></Field>}<Field label="Contenido"><textarea rows="5" value={selected.content || ''} onChange={(e) => patchNode({ content: e.target.value })}/></Field><div className="inspector-actions"><button onClick={duplicateNode}><Copy size={15}/> Duplicar</button><button className="danger" onClick={removeNode}><Trash2 size={15}/> Eliminar</button></div><details className="inspector-section" open><summary>Tareas conectadas <span>{selected.taskIds.length}</span></summary>{workspace.tasks.map((task) => <label key={task.id}><input type="checkbox" checked={selected.taskIds.includes(task.id)} onChange={() => toggleRelation('taskIds', task.id)}/><span className={task.done ? 'done' : ''}>{task.title}</span></label>)}</details><details className="inspector-section" open><summary>Proyectos conectados <span>{selected.projectIds.length}</span></summary>{workspace.projects.map((project) => <label key={project.id}><input type="checkbox" checked={selected.projectIds.includes(project.id)} onChange={() => toggleRelation('projectIds', project.id)}/><span>{project.symbol} {project.name}</span></label>)}</details><button className="unlink-button" onClick={clearConnections}><Unlink size={15}/> Quitar líneas de esta idea</button></> : <div className="inspector-empty"><PenTool size={28}/><strong>Selecciona un elemento</strong><p>Edita su contenido y relaciónalo con el trabajo del equipo.</p><button onClick={() => setInspectorOpen(false)}>Cerrar panel</button></div>}</aside>}
-      {!inspectorOpen && <button className="open-inspector" onClick={() => setInspectorOpen(true)}><Settings size={17}/><span>Propiedades</span></button>}
     </div>
   </div>
 }
