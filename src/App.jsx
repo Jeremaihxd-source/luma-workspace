@@ -37,7 +37,7 @@ export default function App() {
   if (legalPage) return <LegalPage type={legalPage} />
   if (session === undefined) return <LoadingScreen label="Abriendo tu espacio…" />
   if (supabaseConfigured && !session) return <AuthScreen />
-  return <Workspace session={session} />
+  return <Workspace session={session || { user: { id: 'local', email: 'local@luma.app' } }} />
 }
 
 function AuthScreen() {
@@ -166,6 +166,19 @@ function Workspace({ session }) {
   const skipNextSave = useRef(false)
   const cacheKey = activeSpaceId ? `luma-space-${activeSpaceId}` : `luma-workspace-${session?.user.id || 'local'}`
 
+  useEffect(() => {
+    const closeWithEscape = (event) => { if (event.key === 'Escape') setMobileOpen(false) }
+    const leaveMobile = () => { if (window.innerWidth > 760) setMobileOpen(false) }
+    document.body.classList.toggle('mobile-nav-open', mobileOpen)
+    window.addEventListener('keydown', closeWithEscape)
+    window.addEventListener('resize', leaveMobile)
+    return () => {
+      document.body.classList.remove('mobile-nav-open')
+      window.removeEventListener('keydown', closeWithEscape)
+      window.removeEventListener('resize', leaveMobile)
+    }
+  }, [mobileOpen])
+
   const loadSpaces = useCallback(async (preferredId) => {
     const { data, error } = await supabase.from('workspace_members')
       .select('role, joined_at, workspace_id, workspaces!inner(id,name,owner_id,state,updated_at)')
@@ -184,6 +197,14 @@ function Workspace({ session }) {
     let alive = true
     async function hydrate() {
       try {
+        if (!supabaseConfigured) {
+          const cached = localStorage.getItem('luma-workspace-local') || localStorage.getItem('luma-workspace-v2')
+          const seed = cached ? migrateWorkspace(JSON.parse(cached)) : initialWorkspace()
+          const localSpace = { id: 'local', name: 'Mi espacio', owner_id: 'local', state: seed, role: 'owner' }
+          hydrated.current = true
+          setSpaces([localSpace]); setActiveSpaceId('local'); setWorkspace(seed); setSyncState('local')
+          return
+        }
         let nextSpaces = await loadSpaces(activeSpaceId)
         const inviteCode = new URLSearchParams(window.location.search).get('invite')
         if (inviteCode) {
@@ -221,6 +242,7 @@ function Workspace({ session }) {
     if (!workspace || !hydrated.current) return
     localStorage.setItem(cacheKey, JSON.stringify(workspace))
     if (skipNextSave.current) { skipNextSave.current = false; return }
+    if (!supabaseConfigured) { setSyncState('local'); return }
     if (activeRole === 'viewer') return
     setSyncState('saving'); clearTimeout(saveTimer.current)
     saveTimer.current = setTimeout(async () => {
@@ -232,7 +254,7 @@ function Workspace({ session }) {
   }, [workspace, cacheKey, activeSpaceId, activeRole])
 
   useEffect(() => {
-    if (!activeSpaceId) return
+    if (!supabaseConfigured || !activeSpaceId) return
     const channel = supabase.channel(`workspace:${activeSpaceId}`).on('postgres_changes', {
       event: 'UPDATE', schema: 'public', table: 'workspaces', filter: `id=eq.${activeSpaceId}`,
     }, ({ new: next }) => {
@@ -299,10 +321,10 @@ function Workspace({ session }) {
   ]
 
   return <div className={`shell ${view === 'ideas' ? 'idea-mode' : ''} ${sidebarOpen ? '' : 'sidebar-closed'}`} style={{ '--sidebar-width': `${sidebarWidth}px` }}>
-    <aside className={`sidebar ${mobileOpen ? 'open' : ''}`}>
+    <aside className={`sidebar ${mobileOpen ? 'open' : ''}`} aria-label="Navegación principal">
       <div className="brand"><span className="brand-mark">L</span><div>Luma<small>Workspace</small></div><button className="sidebar-close" onClick={toggleSidebar} title="Ocultar menú" aria-label="Ocultar menú lateral"><ChevronLeft size={17}/></button></div>
       <div className="space-switcher compact"><select aria-label="Espacio de trabajo" value={activeSpaceId || ''} onChange={(e) => selectSpace(e.target.value)}>{spaces.map((space) => <option value={space.id} key={space.id}>{space.name}</option>)}</select><ActionMenu ariaLabel="Opciones del espacio" trigger={<MoreHorizontal size={17}/>} items={workspaceActions}/></div>
-      <div className="quick"><ActionMenu className="create-menu" trigger={<><Plus size={16}/> Crear <ChevronDown size={14}/></>} items={createActions}/><button className="square" aria-label="Buscar en el espacio" title="Buscar" onClick={() => setSearchOpen(true)}><Search size={18}/></button></div>
+      <div className="quick"><ActionMenu className="create-menu" trigger={<><Plus size={16}/><span>Crear</span><ChevronDown size={14}/></>} items={createActions}/><button className="square" aria-label="Buscar en el espacio" title="Buscar" onClick={() => setSearchOpen(true)}><Search size={18}/></button></div>
       <div className="sidebar-nav-scroll">{navGroups.map((group) => <section className="nav-group" key={group.label}><div className="nav-label">{group.label}</div><nav className="nav">{group.ids.map((id) => { const [, Icon, label] = navItems.find((item) => item[0] === id); return <button key={id} className={`nav-btn ${view === id ? 'active' : ''}`} onClick={() => go(id)}><Icon size={17}/>{label}{id === 'tasks' && pending > 0 && <span className="nav-count">{pending}</span>}</button> })}</nav></section>)}
         <div className="nav-label pages-label"><button className="pages-toggle" onClick={() => setPagesOpen((value) => !value)}><ChevronRight className={pagesOpen ? 'rotated' : ''} size={14}/> Mis páginas</button><button aria-label="Nueva página" onClick={createPage}><Plus size={14}/></button></div>
         {pagesOpen && <nav className="nav page-nav">{workspace.pages.map((page) => <button key={page.id} className={`nav-btn ${view === `page:${page.id}` ? 'active' : ''}`} onClick={() => go(`page:${page.id}`)}><span className="page-icon">{page.icon || '📄'}</span><span className="page-nav-title">{page.title || 'Sin título'}</span></button>)}</nav>}
@@ -312,7 +334,7 @@ function Workspace({ session }) {
     </aside>
     <div className={`mobile-backdrop ${mobileOpen ? 'open' : ''}`} onClick={() => setMobileOpen(false)} />
     <main className="main">
-      <header className="topbar"><button className="ghost mobile-menu" onClick={() => setMobileOpen(true)}><Menu size={18}/></button>{!sidebarOpen && <button className="sidebar-reopen" onClick={toggleSidebar} title="Mostrar menú" aria-label="Mostrar menú lateral"><Menu size={18}/></button>}<div className="topbar-title"><span className="page-name">{currentPage ? `${currentPage.icon || '📄'} ${currentPage.title || 'Sin título'}` : viewTitle(view)}</span><span>{activeSpace?.name}</span></div><div className="top-actions"><SyncStatus state={syncState}/><button className={`ghost calendar-top ${view === 'agenda' && agendaMode === 'calendar' ? 'active' : ''}`} onClick={() => { go('agenda'); setAgendaMode(agendaMode === 'calendar' && view === 'agenda' ? 'schedule' : 'calendar') }}><CalendarDays size={15}/> {view === 'agenda' && agendaMode === 'calendar' ? 'Horario' : 'Calendario'}</button><button className="square top-search" aria-label="Buscar" title="Buscar" onClick={() => setSearchOpen(true)}><Search size={17}/></button>{canEdit && <ActionMenu align="right" className="top-create" trigger={<><Plus size={16}/> Crear <ChevronDown size={14}/></>} items={createActions}/>}<ActionMenu align="right" ariaLabel="Más opciones" trigger={<MoreHorizontal size={18}/>} items={[{ icon: Share2, label: 'Compartir espacio', onSelect: () => setModal({ type: 'share' }) }, { icon: Settings, label: 'Ajustes', onSelect: () => setModal({ type: 'settings' }) }]}/></div></header>
+      <header className="topbar"><button className="ghost mobile-menu" aria-label="Abrir navegación" onClick={() => setMobileOpen(true)}><Menu size={18}/></button>{!sidebarOpen && <button className="sidebar-reopen" onClick={toggleSidebar} title="Mostrar menú" aria-label="Mostrar menú lateral"><Menu size={18}/></button>}<div className="topbar-title"><span className="page-name">{currentPage ? `${currentPage.icon || '📄'} ${currentPage.title || 'Sin título'}` : viewTitle(view)}</span><span>{activeSpace?.name}</span></div><div className="top-actions"><SyncStatus state={syncState}/><button className={`ghost calendar-top ${view === 'agenda' && agendaMode === 'calendar' ? 'active' : ''}`} onClick={() => { go('agenda'); setAgendaMode(agendaMode === 'calendar' && view === 'agenda' ? 'schedule' : 'calendar') }}><CalendarDays size={15}/> {view === 'agenda' && agendaMode === 'calendar' ? 'Horario' : 'Calendario'}</button><button className="square top-search" aria-label="Buscar" title="Buscar" onClick={() => setSearchOpen(true)}><Search size={17}/></button>{canEdit && <ActionMenu align="right" className="top-create" trigger={<><Plus size={16}/><span>Crear</span><ChevronDown size={14}/></>} items={createActions}/>}<ActionMenu align="right" ariaLabel="Más opciones" trigger={<MoreHorizontal size={18}/>} items={[{ icon: Share2, label: 'Compartir espacio', onSelect: () => setModal({ type: 'share' }) }, { icon: Settings, label: 'Ajustes', onSelect: () => setModal({ type: 'settings' }) }]}/></div></header>
       <div className="content">
         {!supabaseConfigured && <div className="notice-banner">Modo local activo. Conecta Supabase para habilitar cuentas y sincronización entre dispositivos.</div>}
         {view === 'home' && <Dashboard workspace={workspace} go={go} update={update}/>} 
@@ -574,7 +596,7 @@ function IdeasBoard({ workspace, update, go, syncState, setModal }) {
     <header className="studio-bar">
       <div className="studio-identity"><button className="studio-back" onClick={() => go('home')} aria-label="Volver al espacio"><ChevronLeft size={18}/></button><span className="brand-mark">L</span><div><strong>Sala de ideas</strong><small>{workspace.name || 'Lienzo del equipo'}</small></div></div>
       <div className="studio-status"><i className={syncState === 'error' ? 'error' : ''}/><span>{syncedLabel}</span></div>
-      <div className="studio-actions"><ActionMenu className="studio-add" align="right" trigger={<><Plus size={16}/> Añadir <ChevronDown size={14}/></>} items={addItems}/><button className={`studio-tool ${connectFrom ? 'active' : ''}`} disabled={!selectedId} onClick={() => setConnectFrom(connectFrom ? null : selectedId)}><Link2 size={16}/><span>{connectFrom ? 'Cancelar conexión' : 'Conectar'}</span></button><ActionMenu align="right" ariaLabel="Más herramientas" trigger={<MoreHorizontal size={18}/>} items={[{ icon: Copy, label: 'Duplicar selección', onSelect: duplicateNode }, { icon: Download, label: 'Exportar como SVG', onSelect: exportBoard }, { icon: Trash2, label: 'Eliminar selección', danger: true, onSelect: removeNode }]}/><button className="studio-share" onClick={() => setModal({ type: 'share' })}><Users size={16}/> Equipo</button></div>
+      <div className="studio-actions"><ActionMenu className="studio-add" align="right" trigger={<><Plus size={16}/><span>Añadir</span><ChevronDown size={14}/></>} items={addItems}/><button className={`studio-tool ${connectFrom ? 'active' : ''}`} disabled={!selectedId} onClick={() => setConnectFrom(connectFrom ? null : selectedId)}><Link2 size={16}/><span>{connectFrom ? 'Cancelar conexión' : 'Conectar'}</span></button><ActionMenu align="right" ariaLabel="Más herramientas" trigger={<MoreHorizontal size={18}/>} items={[{ icon: Copy, label: 'Duplicar selección', onSelect: duplicateNode }, { icon: Download, label: 'Exportar como SVG', onSelect: exportBoard }, { icon: Trash2, label: 'Eliminar selección', danger: true, onSelect: removeNode }]}/><button className="studio-share" onClick={() => setModal({ type: 'share' })}><Users size={16}/><span>Equipo</span></button></div>
     </header>
     <div className="studio-workspace">
       <div className="studio-rail"><button className={tool === 'select' ? 'active' : ''} title="Seleccionar (V)" onClick={() => setTool('select')}><MousePointer2 size={18}/></button><button className={tool === 'hand' ? 'active' : ''} title="Mover lienzo (H)" onClick={() => setTool('hand')}><Hand size={18}/></button><span/><ActionMenu className="rail-add" trigger={<Plus size={19}/>} ariaLabel="Añadir al lienzo" items={addItems}/><button title="Nota (N)" onClick={() => addNode('note')}><StickyNote size={18}/></button><button title="Texto (T)" onClick={() => addNode('text')}><Type size={18}/></button><button title="Imagen" onClick={() => addNode('image')}><ImageIcon size={18}/></button><span/><button className={snap ? 'active' : ''} title="Ajustar a cuadrícula" onClick={() => setSnap((value) => !value)}><Grid3X3 size={18}/></button><button title="Centrar tablero" onClick={centerBoard}><PenTool size={18}/></button></div>
@@ -843,7 +865,7 @@ function ShareModal({ close, space, session, canEdit }) {
   return <div className="react-modal-backdrop"><div className="react-modal share-modal"><div className="modal-head"><div><h2>Compartir “{space?.name}”</h2><p>Horario, eventos, tareas, páginas y archivos se sincronizan para todo el equipo.</p></div><button className="icon-action" onClick={close}><X size={17}/></button></div><div className="modal-body">{canEdit && <section className="invite-maker"><div><strong>Invitar mediante enlace</strong><small>Elige cuánto tiempo estará disponible. El espacio del equipo no vence.</small></div><label><span>Permiso</span><select value={role} onChange={(e) => setRole(e.target.value)}><option value="editor">Puede editar</option><option value="viewer">Solo lectura</option></select></label><label><span>Duración</span><select value={duration} onChange={(e) => setDuration(e.target.value)}><option value="30">30 días</option><option value="90">90 días</option><option value="365">1 año</option><option value="never">Sin vencimiento</option></select></label><button className="primary" disabled={busy} onClick={createInvite}><Share2 size={15}/> Crear enlace</button></section>}{error && <div className="auth-error">{error}</div>}{invites.length > 0 && <section><h3>Enlaces activos</h3><div className="invite-list">{invites.map((invite) => <div className="invite-row" key={invite.id}><code>{invite.code}</code><span>{invite.role === 'editor' ? 'Editor' : 'Lector'} · {invite.expires_at ? `vence ${new Date(invite.expires_at).toLocaleDateString('es')}` : 'sin vencimiento'} · {invite.uses}/{invite.max_uses} usos</span><button className="ghost" onClick={() => copyInvite(invite)}>{copied === invite.id ? <Check size={15}/> : <Copy size={15}/>} {copied === invite.id ? 'Copiado' : 'Copiar'}</button></div>)}</div></section>}<section><h3>Personas con acceso</h3><div className="member-list">{members.map((member) => <div className="member-row" key={member.user_id}><span className="user-avatar">{member.email.slice(0, 2).toUpperCase()}</span><div><strong>{member.email}</strong><small>{member.user_id === session.user.id ? 'Tú' : 'Miembro'}</small></div><span className="role-pill">{member.role === 'owner' ? 'Propietario' : member.role === 'editor' ? 'Editor' : 'Lector'}</span></div>)}</div></section></div><div className="modal-actions"><button className="primary" onClick={close}>Listo</button></div></div></div>
 }
 
-function FormModal({ title, close, onSubmit, children, extra }) { return <div className="react-modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) close() }}><form className="react-modal" onSubmit={(e) => { e.preventDefault(); onSubmit(new FormData(e.currentTarget)) }}><div className="modal-head"><h2>{title}</h2><button type="button" className="icon-action" onClick={close}><X size={17}/></button></div><div className="modal-body">{children}{extra}</div><div className="modal-actions"><button type="button" className="ghost" onClick={close}>Cancelar</button><button className="primary">Guardar</button></div></form></div> }
+function FormModal({ title, close, onSubmit, children, extra }) { return <div className="react-modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) close() }}><form className="react-modal" onSubmit={(e) => { e.preventDefault(); onSubmit(new FormData(e.currentTarget)) }}><div className="modal-head"><h2>{title}</h2><button type="button" className="icon-action" aria-label="Cerrar" onClick={close}><X size={17}/></button></div><div className="modal-body">{children}{extra}</div><div className="modal-actions"><button type="button" className="ghost" onClick={close}>Cancelar</button><button className="primary">Guardar</button></div></form></div> }
 function ConfirmModal({ close, confirm, title, children }) { return <div className="react-modal-backdrop"><div className="react-modal"><div className="modal-head"><h2>{title}</h2><button className="icon-action" onClick={close}><X size={17}/></button></div><div className="modal-body"><p>{children}</p></div><div className="modal-actions"><button className="ghost" onClick={close}>Cancelar</button><button className="primary danger-fill" onClick={confirm}>Mover a la papelera</button></div></div></div> }
 function Field({ label, children }) { return <label className="field"><span>{label}</span>{children}</label> }
 function SettingsModal({ close, workspace, update, session }) { const exportData = () => { const url = URL.createObjectURL(new Blob([JSON.stringify(workspace, null, 2)], { type: 'application/json' })); const a = document.createElement('a'); a.href = url; a.download = 'luma-workspace.json'; a.click(); URL.revokeObjectURL(url) }; return <div className="react-modal-backdrop"><div className="react-modal"><div className="modal-head"><h2>Ajustes</h2><button className="icon-action" onClick={close}><X size={17}/></button></div><div className="modal-body"><button className="ghost" onClick={exportData}>Descargar copia de datos</button><button className="ghost danger" onClick={() => update(() => initialWorkspace())}>Restaurar datos de ejemplo</button>{session && <button className="ghost" onClick={() => supabase.auth.signOut()}><LogOut size={15}/> Cerrar sesión</button>}</div><div className="modal-actions"><button className="primary" onClick={close}>Listo</button></div></div></div> }
