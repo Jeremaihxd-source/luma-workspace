@@ -8,7 +8,8 @@ import {
 } from 'lucide-react'
 import { getAuthRedirectUrl, supabase, supabaseConfigured } from './lib/supabase'
 import { layoutCalendarEvents } from './calendarLayout'
-import { COLORS, DAYS, initialWorkspace, iso, localDateKey, migrateWorkspace, uid } from './state'
+import { COLORS, DAYS, initialWorkspace, iso, localDateKey, migrateWorkspace, parseWorkspaceCache, uid } from './state'
+import { normalizeTableData, parseLocalizedNumber, parsePastedGrid, tableToCsv } from './tableUtils'
 
 const navItems = [
   ['home', Home, 'Inicio'], ['agenda', CalendarDays, 'Agenda'], ['tasks', CheckSquare, 'Tareas'],
@@ -29,7 +30,9 @@ export default function App() {
 
   useEffect(() => {
     if (!supabaseConfigured) { setSession(null); return }
-    supabase.auth.getSession().then(({ data }) => setSession(data.session))
+    supabase.auth.getSession()
+      .then(({ data, error }) => setSession(error ? null : data.session))
+      .catch(() => setSession(null))
     const { data: listener } = supabase.auth.onAuthStateChange((_event, next) => setSession(next))
     return () => listener.subscription.unsubscribe()
   }, [])
@@ -60,29 +63,45 @@ function AuthScreen() {
     const form = new FormData(event.currentTarget)
     const email = String(form.get('email')).trim()
     const password = String(form.get('password'))
-    const result = mode === 'register'
-      ? await supabase.auth.signUp({ email, password, options: { emailRedirectTo: getAuthRedirectUrl() } })
-      : await supabase.auth.signInWithPassword({ email, password })
-    if (result.error) setMessage({ type: 'error', text: authErrorMessage(result.error) })
-    else if (mode === 'register' && !result.data.session) { setPendingEmail(email); setMessage({ type: 'success', text: 'Revisa tu correo para confirmar la cuenta.' }) }
-    setBusy(false)
+    try {
+      const result = mode === 'register'
+        ? await supabase.auth.signUp({ email, password, options: { emailRedirectTo: getAuthRedirectUrl() } })
+        : await supabase.auth.signInWithPassword({ email, password })
+      if (result.error) setMessage({ type: 'error', text: authErrorMessage(result.error) })
+      else if (mode === 'register' && !result.data.session) { setPendingEmail(email); setMessage({ type: 'success', text: 'Revisa tu correo para confirmar la cuenta.' }) }
+    } catch (error) {
+      setMessage({ type: 'error', text: authErrorMessage(error) })
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function resendConfirmation() {
     if (!pendingEmail) return
     setBusy(true); setMessage(null)
-    const { error } = await supabase.auth.resend({ type: 'signup', email: pendingEmail, options: { emailRedirectTo: getAuthRedirectUrl() } })
-    setMessage(error ? { type: 'error', text: authErrorMessage(error) } : { type: 'success', text: 'Enviamos un nuevo enlace de confirmación.' })
-    setBusy(false)
+    try {
+      const { error } = await supabase.auth.resend({ type: 'signup', email: pendingEmail, options: { emailRedirectTo: getAuthRedirectUrl() } })
+      setMessage(error ? { type: 'error', text: authErrorMessage(error) } : { type: 'success', text: 'Enviamos un nuevo enlace de confirmación.' })
+    } catch (error) {
+      setMessage({ type: 'error', text: authErrorMessage(error) })
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function signInWithGoogle() {
     setBusy(true); setMessage(null)
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider: 'google',
-      options: { redirectTo: getAuthRedirectUrl() },
-    })
-    if (error) { setMessage({ type: 'error', text: authErrorMessage(error) }); setBusy(false) }
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: { redirectTo: getAuthRedirectUrl() },
+      })
+      if (error) setMessage({ type: 'error', text: authErrorMessage(error) })
+    } catch (error) {
+      setMessage({ type: 'error', text: authErrorMessage(error) })
+    } finally {
+      setBusy(false)
+    }
   }
 
   return <div className="auth-screen">
@@ -199,7 +218,7 @@ function Workspace({ session }) {
       try {
         if (!supabaseConfigured) {
           const cached = localStorage.getItem('luma-workspace-local') || localStorage.getItem('luma-workspace-v2')
-          const seed = cached ? migrateWorkspace(JSON.parse(cached)) : initialWorkspace()
+          const seed = parseWorkspaceCache(cached) || initialWorkspace()
           const localSpace = { id: 'local', name: 'Mi espacio', owner_id: 'local', state: seed, role: 'owner' }
           hydrated.current = true
           setSpaces([localSpace]); setActiveSpaceId('local'); setWorkspace(seed); setSyncState('local')
@@ -213,7 +232,7 @@ function Workspace({ session }) {
         }
         if (!nextSpaces.length) {
           const cached = localStorage.getItem(`luma-workspace-${session.user.id}`) || localStorage.getItem('luma-workspace-v2')
-          let seed = cached ? migrateWorkspace(JSON.parse(cached)) : initialWorkspace()
+          let seed = parseWorkspaceCache(cached) || initialWorkspace()
           const { data: legacy } = await supabase.from('user_workspaces').select('state').eq('user_id', session.user.id).maybeSingle()
           if (legacy?.state) seed = migrateWorkspace(legacy.state)
           const { data: created, error } = await supabase.rpc('create_workspace', { p_name: 'Mi espacio', p_state: seed })
@@ -240,15 +259,15 @@ function Workspace({ session }) {
   const activeRole = spaces.find((space) => space.id === activeSpaceId)?.role
   useEffect(() => {
     if (!workspace || !hydrated.current) return
-    localStorage.setItem(cacheKey, JSON.stringify(workspace))
+    try { localStorage.setItem(cacheKey, JSON.stringify(workspace)) } catch { /* Cloud sync remains available if local storage is full. */ }
     if (skipNextSave.current) { skipNextSave.current = false; return }
     if (!supabaseConfigured) { setSyncState('local'); return }
     if (activeRole === 'viewer') return
     setSyncState('saving'); clearTimeout(saveTimer.current)
     saveTimer.current = setTimeout(async () => {
-      const { error } = await supabase.from('workspaces').update({ state: workspace }).eq('id', activeSpaceId)
-      if (!error) setSpaces((current) => current.map((space) => space.id === activeSpaceId ? { ...space, state: workspace } : space))
-      setSyncState(error ? 'error' : 'synced')
+      const { data, error } = await supabase.from('workspaces').update({ state: workspace }).eq('id', activeSpaceId).select('id, updated_at').maybeSingle()
+      if (!error && data) setSpaces((current) => current.map((space) => space.id === activeSpaceId ? { ...space, state: workspace, updated_at: data.updated_at } : space))
+      setSyncState(error || !data ? 'error' : 'synced')
     }, 600)
     return () => clearTimeout(saveTimer.current)
   }, [workspace, cacheKey, activeSpaceId, activeRole])
@@ -261,18 +280,24 @@ function Workspace({ session }) {
       const incoming = migrateWorkspace(next.state)
       skipNextSave.current = true; setWorkspace(incoming); setSyncState('synced')
       setSpaces((current) => current.map((space) => space.id === activeSpaceId ? { ...space, ...next } : space))
-    }).subscribe()
+    }).subscribe((status) => {
+      if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') setSyncState('error')
+    })
     return () => { supabase.removeChannel(channel) }
   }, [activeSpaceId])
 
   const selectSpace = (id) => { hydrated.current = false; skipNextSave.current = true; setActiveSpaceId(id); setView('agenda'); setMobileOpen(false) }
   const createSpace = async (name) => {
+    if (!supabaseConfigured) throw new Error('Conecta Supabase para crear espacios colaborativos.')
     const { data, error } = await supabase.rpc('create_workspace', { p_name: name, p_state: initialWorkspace() })
     if (error) throw error
     await loadSpaces(data); selectSpace(data)
   }
   const joinSpace = async (code) => {
-    const normalized = code.includes('invite=') ? new URL(code, window.location.origin).searchParams.get('invite') : code
+    if (!supabaseConfigured) throw new Error('Conecta Supabase para unirte a espacios colaborativos.')
+    let normalized = String(code || '').trim()
+    try { if (normalized.includes('invite=')) normalized = new URL(normalized, window.location.origin).searchParams.get('invite') || '' } catch { throw new Error('El enlace de invitación no es válido.') }
+    if (!normalized) throw new Error('Escribe un código de invitación válido.')
     const { data, error } = await supabase.rpc('accept_workspace_invite', { p_code: normalized })
     if (error) throw error
     await loadSpaces(data); selectSpace(data)
@@ -376,7 +401,10 @@ function openContextModal(view, setModal) { if (view === 'agenda') setModal({ ty
 
 function Dashboard({ workspace, go, update }) {
   const todo = workspace.tasks.filter((task) => !task.done).sort((a, b) => (a.date || '9999-12-31').localeCompare(b.date || '9999-12-31'))
-  const upcoming = [...workspace.events].filter((event) => event.date >= localDateKey(new Date())).sort((a, b) => a.date.localeCompare(b.date) || a.start - b.start).slice(0, 4)
+  const now = new Date()
+  const todayKey = localDateKey(now)
+  const currentMinute = now.getHours() * 60 + now.getMinutes()
+  const upcoming = [...workspace.events].filter((event) => event.date > todayKey || (event.date === todayKey && event.start + event.duration >= currentMinute)).sort((a, b) => a.date.localeCompare(b.date) || a.start - b.start).slice(0, 4)
   const progress = workspace.projects.length ? Math.round(workspace.projects.reduce((sum, project) => sum + projectStats(project, workspace.tasks).progress, 0) / workspace.projects.length) : 0
   return <><ViewHead eyebrow="Resumen" title="Hoy" subtitle="Primero, termina lo que tienes pendiente. El resto queda a mano sin distraerte." action={<button className="ghost" onClick={() => go('agenda')}>Abrir agenda <ChevronRight size={15}/></button>}/><div className="dashboard-focus"><section className="panel pending-panel"><div className="panel-heading"><div><span>Prioridad de hoy</span><h2>Siguientes tareas</h2></div><button className="ghost" onClick={() => go('tasks')}>Ver todas <ChevronRight size={14}/></button></div><div className="list">{todo.slice(0, 7).map((task) => <label className="list-row" key={task.id}><input className="check" type="checkbox" checked={task.done} onChange={(e) => update((draft) => { draft.tasks.find((x) => x.id === task.id).done = e.target.checked; return draft })}/><span>{task.title}<small>{task.date ? formatTinyDate(parseDate(task.date)) : 'Sin fecha'}</small></span><Priority value={task.priority}/></label>)}{!todo.length && <Empty text="No tienes tareas pendientes."/>}</div></section><aside className="dashboard-overview"><div className="metrics"><Metric value={todo.length} label="pendientes"/><Metric value={upcoming.length} label="próximos bloques"/><Metric value={`${progress}%`} label="progreso"/></div><section className="panel upcoming-panel"><h2>Próximos bloques</h2><div className="list">{upcoming.map((event) => <button className="list-row result" key={event.id} onClick={() => go('agenda')}><span>{formatTinyDate(parseDate(event.date))}</span><div><strong>{event.title}</strong><div className="top-date">{clock(event.start)} · {event.duration} min</div></div><ChevronRight size={16}/></button>)}{!upcoming.length && <Empty text="No hay bloques próximos."/>}</div></section></aside></div></>
 }
@@ -660,14 +688,15 @@ function WorkspaceFiles({ space, canEdit, session }) {
   const [message, setMessage] = useState('')
   const input = useRef(null)
   const load = useCallback(async () => {
-    if (!space?.id) return
+    if (!supabaseConfigured || !space?.id) return
     const { data, error } = await supabase.from('workspace_files').select('*').eq('workspace_id', space.id).order('created_at', { ascending: false })
     if (error) setMessage(error.message); else { setFiles(data || []); setMessage('') }
   }, [space?.id])
   useEffect(() => { load() }, [load])
   async function upload(event) {
     const selected = event.target.files?.[0]; event.target.value = ''
-    if (!selected || !canEdit) return
+    if (!selected || !canEdit || !supabaseConfigured) return
+    if (selected.size > 50 * 1024 * 1024) { setMessage('El archivo supera el límite de 50 MB.'); return }
     setBusy(true); setMessage('')
     const safeName = selected.name.replace(/[^a-zA-Z0-9._-]/g, '_')
     const storagePath = `${space.id}/${uid()}-${safeName}`
@@ -678,17 +707,19 @@ function WorkspaceFiles({ space, canEdit, session }) {
     setBusy(false)
   }
   async function download(file) {
+    if (!supabaseConfigured) return
     const { data, error } = await supabase.storage.from('workspace-files').createSignedUrl(file.storage_path, 60)
     if (error) setMessage(error.message); else window.open(data.signedUrl, '_blank', 'noopener')
   }
   async function remove(file) {
-    if (!canEdit || !confirm(`¿Eliminar ${file.name}?`)) return
+    if (!supabaseConfigured || !canEdit || !confirm(`¿Eliminar ${file.name}?`)) return
     setBusy(true)
     const stored = await supabase.storage.from('workspace-files').remove([file.storage_path])
     if (stored.error) setMessage(stored.error.message)
     else { const { error } = await supabase.from('workspace_files').delete().eq('id', file.id); if (error) setMessage(error.message); else await load() }
     setBusy(false)
   }
+  if (!supabaseConfigured) return <><ViewHead eyebrow="Equipo" title="Archivos compartidos" subtitle="Conecta Supabase para guardar archivos privados y compartirlos con tu equipo."/><section className="panel"><Empty text="Los archivos compartidos no están disponibles en modo local."/></section></>
   return <><ViewHead eyebrow="Equipo" title="Archivos compartidos" subtitle="Documentos privados para todas las personas de este espacio." action={canEdit && <><input ref={input} hidden type="file" onChange={upload}/><button className="primary" disabled={busy} onClick={() => input.current?.click()}><Upload size={15}/>{busy ? ' Subiendo…' : ' Subir archivo'}</button></>}/>{message && <div className="notice-banner">{message}</div>}<section className="panel"><div className="file-list">{files.map((file) => <div className="file-row" key={file.id}><span className="file-icon"><FileText size={18}/></span><div><strong>{file.name}</strong><small>{formatBytes(file.size_bytes)} · {new Date(file.created_at).toLocaleDateString('es')}</small></div><button className="ghost" onClick={() => download(file)}><Download size={15}/> Descargar</button>{canEdit && <button className="icon-action" title="Eliminar" onClick={() => remove(file)}><Trash2 size={15}/></button>}</div>)}{!files.length && <Empty text="Aún no hay archivos. Sube el primero para compartirlo con el equipo."/>}</div></section></>
 }
 
@@ -711,7 +742,7 @@ function Notes({ workspace, update, pageId = null }) {
   const format = (command) => {
     const element = document.querySelector(`[data-rich-block="${activeBlock.current}"]`)
     if (!element) return
-    if (command === 'createLink') { const url = prompt('Dirección del enlace:', 'https://'); if (!url) return; document.execCommand(command, false, url) } else document.execCommand(command)
+    if (command === 'createLink') { const url = prompt('Dirección del enlace:', 'https://'); if (!url || !/^https?:\/\//i.test(url)) return; document.execCommand(command, false, url) } else document.execCommand(command)
     const html = sanitizeRich(element.innerHTML); update((draft) => { const block = getDocument(draft).blocks.find((x) => x.id === activeBlock.current); block.html = html; block.content = element.innerText; return draft })
   }
   const patchActiveBlock = (changes) => {
@@ -751,15 +782,40 @@ function PageRelations({ page, workspace, update }) {
 
 function FormatButton({ title, onClick, children }) { return <button title={title} onMouseDown={(e) => e.preventDefault()} onClick={onClick}>{children}</button> }
 function RichBlock({ block, update, activeBlock, openMenu, getDocument }) {
-  const updateContent = (element) => update((draft) => { const target = getDocument(draft).blocks.find((x) => x.id === block.id); target.content = element.innerText; target.html = sanitizeRich(element.innerHTML); return draft })
+  const updateContent = (element) => update((draft) => { const target = getDocument(draft).blocks.find((x) => x.id === block.id); if (target) { target.content = element.innerText; target.html = sanitizeRich(element.innerHTML) } return draft })
   const remove = () => update((draft) => { const doc = getDocument(draft); doc.blocks = doc.blocks.length === 1 ? [{ id: uid(), type: 'text', content: '' }] : doc.blocks.filter((x) => x.id !== block.id); return draft })
   const move = (amount) => update((draft) => { const blocks = getDocument(draft).blocks; const index = blocks.findIndex((item) => item.id === block.id); const next = clamp(index + amount, 0, blocks.length - 1); if (next !== index) blocks.splice(next, 0, blocks.splice(index, 1)[0]); return draft })
   const duplicate = () => update((draft) => { const blocks = getDocument(draft).blocks; const index = blocks.findIndex((item) => item.id === block.id); blocks.splice(index + 1, 0, { ...structuredClone(block), id: uid() }); return draft })
+  const handleKeys = (event) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault()
+      const nextId = uid()
+      const element = event.currentTarget
+      update((draft) => {
+        const blocks = getDocument(draft).blocks
+        const index = blocks.findIndex((item) => item.id === block.id)
+        if (index < 0) return draft
+        blocks[index].content = element.innerText
+        blocks[index].html = sanitizeRich(element.innerHTML)
+        blocks.splice(index + 1, 0, { id: nextId, type: block.type === 'bullet' ? 'bullet' : 'text', content: '' })
+        return draft
+      })
+      activeBlock.current = nextId
+      setTimeout(() => document.querySelector(`[data-rich-block="${nextId}"]`)?.focus(), 0)
+    } else if (event.key === 'Backspace' && !event.currentTarget.innerText) {
+      const blocks = event.currentTarget.closest('.notion-editor')?.querySelectorAll('[data-rich-block]')
+      if (!blocks || blocks.length <= 1) return
+      event.preventDefault()
+      const previous = event.currentTarget.closest('.note-block')?.previousElementSibling?.querySelector('[data-rich-block]')
+      remove()
+      setTimeout(() => previous?.focus(), 0)
+    }
+  }
   const controls = <div className="block-controls"><button title="Subir bloque" onClick={() => move(-1)}><ArrowUp size={13}/></button><button title="Bajar bloque" onClick={() => move(1)}><ArrowDown size={13}/></button><button title="Duplicar bloque" onClick={duplicate}><Copy size={13}/></button><button className="danger" title="Eliminar bloque" onClick={remove}><Trash2 size={13}/></button></div>
   if (block.type === 'divider') return <div className="note-block divider-block"><GripVertical className="block-grip" size={15}/><hr/>{controls}</div>
   if (block.type === 'table') return <SmartTable block={block} update={update} getDocument={getDocument} controls={controls}/>
   const Tag = block.type === 'h1' ? 'h2' : block.type === 'h2' ? 'h3' : 'div'
-  return <div className={`note-block type-${block.type}`}><GripVertical className="block-grip" size={15}/>{block.type === 'bullet' && <span className="bullet">•</span>}{block.type === 'todo' && <input className="check" type="checkbox" checked={Boolean(block.checked)} onChange={(e) => update((draft) => { getDocument(draft).blocks.find((x) => x.id === block.id).checked = e.target.checked; return draft })}/>} {block.type === 'callout' && <span className="callout-icon">💡</span>}<Tag data-rich-block={block.id} className="block-content" style={{ textAlign: block.align || 'left', color: block.textColor || undefined }} contentEditable suppressContentEditableWarning data-placeholder="Escribe / para insertar…" dangerouslySetInnerHTML={{ __html: block.html ? sanitizeRich(block.html) : escapeHtml(block.content || '') }} onFocus={() => { activeBlock.current = block.id }} onInput={(e) => { if (e.currentTarget.innerText.trim() === '/') openMenu(e.currentTarget) }} onBlur={(e) => updateContent(e.currentTarget)}/>{controls}</div>
+  return <div className={`note-block type-${block.type}`}><GripVertical className="block-grip" size={15}/>{block.type === 'bullet' && <span className="bullet">•</span>}{block.type === 'todo' && <input className="check" type="checkbox" checked={Boolean(block.checked)} onChange={(e) => update((draft) => { getDocument(draft).blocks.find((x) => x.id === block.id).checked = e.target.checked; return draft })}/>} {block.type === 'callout' && <span className="callout-icon">💡</span>}<Tag data-rich-block={block.id} className="block-content" style={{ textAlign: block.align || 'left', color: block.textColor || undefined }} contentEditable suppressContentEditableWarning data-placeholder="Escribe / para insertar…" dangerouslySetInnerHTML={{ __html: block.html ? sanitizeRich(block.html) : escapeHtml(block.content || '') }} onFocus={() => { activeBlock.current = block.id }} onInput={(e) => { if (e.currentTarget.innerText.trim() === '/') openMenu(e.currentTarget) }} onKeyDown={handleKeys} onBlur={(e) => updateContent(e.currentTarget)}/>{controls}</div>
 }
 
 function createTableData() {
@@ -776,15 +832,17 @@ function createTableData() {
 
 function SmartTable({ block, update, getDocument, controls }) {
   const [query, setQuery] = useState('')
-  const columnCount = Math.max(block.columns?.length || 0, block.rows?.[0]?.length || 0, 2)
-  const columns = Array.from({ length: columnCount }, (_, index) => block.columns?.[index] || { id: `legacy-${index}`, name: `Columna ${index + 1}`, type: 'text' })
-  const rows = (block.rows?.length ? block.rows : [Array(columnCount).fill('')]).map((row) => [...row, ...Array(Math.max(0, columnCount - row.length)).fill('')])
+  const normalized = normalizeTableData(block, uid)
+  const columns = normalized.columns
+  const rows = normalized.rows
   const filteredRows = rows.map((row, index) => ({ row, index })).filter(({ row }) => !query || row.some((cell) => String(cell ?? '').toLowerCase().includes(query.toLowerCase())))
   const mutate = (change) => update((draft) => {
     const target = getDocument(draft).blocks.find((item) => item.id === block.id)
+    if (!target) return draft
     target.name ||= 'Registro'
-    target.columns = Array.from({ length: Math.max(target.columns?.length || 0, target.rows?.[0]?.length || 0, 2) }, (_, index) => target.columns?.[index] || { id: uid(), name: `Columna ${index + 1}`, type: 'text' })
-    target.rows = (target.rows?.length ? target.rows : [Array(target.columns.length).fill('')]).map((row) => [...row, ...Array(Math.max(0, target.columns.length - row.length)).fill('')])
+    const safe = normalizeTableData(target, uid)
+    target.columns = safe.columns
+    target.rows = safe.rows
     change(target)
     return draft
   })
@@ -794,24 +852,38 @@ function SmartTable({ block, update, getDocument, controls }) {
   const removeRow = (rowIndex) => mutate((table) => { if (table.rows.length > 1) table.rows.splice(rowIndex, 1); else table.rows[0] = Array(table.columns.length).fill('') })
   const removeColumn = (columnIndex) => mutate((table) => { if (table.columns.length <= 2) return; table.columns.splice(columnIndex, 1); table.rows.forEach((row) => row.splice(columnIndex, 1)) })
   const exportCsv = () => {
-    const quote = (value) => `"${String(value ?? '').replaceAll('"', '""')}"`
-    const csv = [columns.map((column) => quote(column.name)).join(','), ...rows.map((row) => row.map(quote).join(','))].join('\n')
+    const csv = tableToCsv(columns, rows)
     downloadText(`\ufeff${csv}`, `${(block.name || 'registro').replace(/[^a-z0-9-_]+/gi, '-').toLowerCase()}.csv`, 'text/csv;charset=utf-8')
   }
-  const parseNumber = (value) => { const parsed = Number(String(value ?? '').replace(',', '.').replace(/[^0-9.-]/g, '')); return Number.isFinite(parsed) ? parsed : 0 }
   const formatNumber = (value, currency = false) => new Intl.NumberFormat('es-CO', currency ? { style: 'currency', currency: 'COP', maximumFractionDigits: 2 } : { maximumFractionDigits: 2 }).format(value)
   const focusNextRow = (event, rowIndex, columnIndex) => {
     if (event.key !== 'Enter') return
     event.preventDefault()
-    event.currentTarget.closest('tr')?.nextElementSibling?.querySelector(`[data-column="${columnIndex}"]`)?.focus()
+    if (rowIndex === rows.length - 1) addRow()
+    setTimeout(() => document.querySelector(`[data-table="${block.id}"][data-row="${rowIndex + 1}"][data-column="${columnIndex}"]`)?.focus(), 0)
   }
-  return <div className="note-block table-block"><GripVertical className="block-grip" size={15}/><div className="smart-table"><div className="table-toolbar"><input className="table-name" aria-label="Nombre de la tabla" value={block.name || 'Registro'} onChange={(event) => mutate((table) => { table.name = event.target.value })}/><span>{rows.length} registro{rows.length === 1 ? '' : 's'}</span><input className="table-search" type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar…"/><button onClick={addColumn}><Plus size={13}/> Columna</button><button onClick={exportCsv}><Download size={13}/> CSV</button></div><div className="table-scroll"><table><thead><tr><th className="row-number">#</th>{columns.map((column, columnIndex) => <th key={column.id}><input aria-label={`Nombre de columna ${columnIndex + 1}`} value={column.name} onChange={(event) => mutate((table) => { table.columns[columnIndex].name = event.target.value })}/><div><select aria-label={`Tipo de ${column.name}`} value={column.type || 'text'} onChange={(event) => mutate((table) => { table.columns[columnIndex].type = event.target.value })}><option value="text">Texto</option><option value="number">Número</option><option value="currency">Moneda</option><option value="date">Fecha</option><option value="checkbox">Sí / No</option></select><button title="Eliminar columna" disabled={columns.length <= 2} onClick={() => removeColumn(columnIndex)}>×</button></div></th>)}<th className="row-actions"/></tr></thead><tbody>{filteredRows.map(({ row, index: rowIndex }) => <tr key={rowIndex}><th className="row-number">{rowIndex + 1}</th>{columns.map((column, columnIndex) => <td key={column.id}>{column.type === 'checkbox' ? <input data-column={columnIndex} className="table-check" type="checkbox" checked={row[columnIndex] === true || row[columnIndex] === 'true'} onChange={(event) => updateCell(rowIndex, columnIndex, event.target.checked)}/> : <input data-column={columnIndex} type={column.type === 'date' ? 'date' : column.type === 'number' || column.type === 'currency' ? 'number' : 'text'} step={column.type === 'number' || column.type === 'currency' ? 'any' : undefined} value={row[columnIndex] ?? ''} placeholder={columnIndex === 0 ? 'Nuevo registro' : ''} onChange={(event) => updateCell(rowIndex, columnIndex, event.target.value)} onKeyDown={(event) => focusNextRow(event, rowIndex, columnIndex)}/>}</td>)}<td className="row-actions"><button title="Eliminar fila" onClick={() => removeRow(rowIndex)}>×</button></td></tr>)}{!filteredRows.length && <tr><td className="table-no-results" colSpan={columns.length + 2}>No hay registros que coincidan.</td></tr>}</tbody><tfoot><tr><th className="row-number">Σ</th>{columns.map((column, columnIndex) => { if (column.type !== 'number' && column.type !== 'currency') return <td key={column.id}><span>{rows.filter((row) => String(row[columnIndex] ?? '').trim()).length || '—'}</span></td>; const values = rows.filter((row) => String(row[columnIndex] ?? '').trim() !== '').map((row) => parseNumber(row[columnIndex])); const total = values.reduce((sum, value) => sum + value, 0); return <td key={column.id}><strong>{formatNumber(total, column.type === 'currency')}</strong><small>Prom. {formatNumber(total / Math.max(values.length, 1), column.type === 'currency')}</small></td> })}<td/></tr></tfoot></table></div><button className="table-add" onClick={addRow}><Plus size={13}/> Añadir registro</button></div>{controls}</div>
+  const pasteGrid = (event, rowIndex, columnIndex) => {
+    const text = event.clipboardData?.getData('text/plain') || ''
+    if (!text.includes('\t') && !/[\r\n]/.test(text)) return
+    event.preventDefault()
+    const grid = parsePastedGrid(text).slice(0, 500)
+    if (!grid.length) return
+    mutate((table) => {
+      const requiredColumns = Math.min(50, columnIndex + Math.max(...grid.map((row) => row.length)))
+      while (table.columns.length < requiredColumns) table.columns.push({ id: uid(), name: `Columna ${table.columns.length + 1}`, type: 'text' })
+      const requiredRows = Math.min(2000, rowIndex + grid.length)
+      while (table.rows.length < requiredRows) table.rows.push(Array(table.columns.length).fill(''))
+      table.rows.forEach((row) => { while (row.length < table.columns.length) row.push('') })
+      grid.slice(0, requiredRows - rowIndex).forEach((pastedRow, rowOffset) => pastedRow.slice(0, requiredColumns - columnIndex).forEach((value, columnOffset) => { table.rows[rowIndex + rowOffset][columnIndex + columnOffset] = value }))
+    })
+  }
+  return <div className="note-block table-block"><GripVertical className="block-grip" size={15}/><div className="smart-table"><div className="table-toolbar"><input className="table-name" aria-label="Nombre de la tabla" value={block.name || 'Registro'} onChange={(event) => mutate((table) => { table.name = event.target.value })}/><span>{rows.length} registro{rows.length === 1 ? '' : 's'}</span><input className="table-search" type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar…"/><button onClick={addColumn}><Plus size={13}/> Columna</button><button onClick={exportCsv}><Download size={13}/> CSV</button></div><div className="table-scroll"><table><thead><tr><th className="row-number">#</th>{columns.map((column, columnIndex) => <th key={column.id}><input aria-label={`Nombre de columna ${columnIndex + 1}`} value={column.name} onChange={(event) => mutate((table) => { table.columns[columnIndex].name = event.target.value })}/><div><select aria-label={`Tipo de ${column.name}`} value={column.type || 'text'} onChange={(event) => mutate((table) => { table.columns[columnIndex].type = event.target.value })}><option value="text">Texto</option><option value="number">Número</option><option value="currency">Moneda</option><option value="date">Fecha</option><option value="checkbox">Sí / No</option></select><button title="Eliminar columna" disabled={columns.length <= 2} onClick={() => removeColumn(columnIndex)}>×</button></div></th>)}<th className="row-actions"/></tr></thead><tbody>{filteredRows.map(({ row, index: rowIndex }) => <tr key={rowIndex}><th className="row-number">{rowIndex + 1}</th>{columns.map((column, columnIndex) => <td key={column.id}>{column.type === 'checkbox' ? <input data-table={block.id} data-row={rowIndex} data-column={columnIndex} className="table-check" type="checkbox" checked={row[columnIndex] === true || row[columnIndex] === 'true'} onChange={(event) => updateCell(rowIndex, columnIndex, event.target.checked)}/> : <input data-table={block.id} data-row={rowIndex} data-column={columnIndex} type={column.type === 'date' ? 'date' : 'text'} inputMode={column.type === 'number' || column.type === 'currency' ? 'decimal' : undefined} value={row[columnIndex] ?? ''} placeholder={columnIndex === 0 ? 'Nuevo registro' : ''} onChange={(event) => updateCell(rowIndex, columnIndex, event.target.value)} onPaste={(event) => pasteGrid(event, rowIndex, columnIndex)} onKeyDown={(event) => focusNextRow(event, rowIndex, columnIndex)}/>}</td>)}<td className="row-actions"><button title="Eliminar fila" onClick={() => removeRow(rowIndex)}>×</button></td></tr>)}{!filteredRows.length && <tr><td className="table-no-results" colSpan={columns.length + 2}>No hay registros que coincidan.</td></tr>}</tbody><tfoot><tr><th className="row-number">Σ</th>{columns.map((column, columnIndex) => { if (column.type !== 'number' && column.type !== 'currency') return <td key={column.id}><span>{rows.filter((row) => String(row[columnIndex] ?? '').trim()).length || '—'}</span></td>; const values = rows.map((row) => parseLocalizedNumber(row[columnIndex])).filter((value) => value !== null); const total = values.reduce((sum, value) => sum + value, 0); return <td key={column.id}><strong>{formatNumber(total, column.type === 'currency')}</strong><small>Prom. {formatNumber(total / Math.max(values.length, 1), column.type === 'currency')}</small></td> })}<td/></tr></tfoot></table></div><button className="table-add" onClick={addRow}><Plus size={13}/> Añadir registro</button></div>{controls}</div>
 }
 
 const blockOptions = [
   ['text', '¶', 'Texto', 'Párrafo sencillo'], ['h1', 'H1', 'Título', 'Encabezado principal'], ['h2', 'H2', 'Subtítulo', 'Encabezado secundario'], ['bullet', '•', 'Lista', 'Lista con viñetas'], ['todo', '☐', 'Tarea', 'Casilla dentro del documento'], ['quote', '❝', 'Cita', 'Destaca una frase'], ['callout', '💡', 'Aviso', 'Bloque destacado'], ['table', '▦', 'Tabla de datos', 'Registros, tipos y cálculos simples'], ['divider', '―', 'Separador', 'Divide secciones'],
 ]
-function BlockMenu({ position, add, close }) { useEffect(() => { const handler = (e) => { if (!e.target.closest('.editor-popover')) close() }; setTimeout(() => document.addEventListener('pointerdown', handler), 0); return () => document.removeEventListener('pointerdown', handler) }, [close]); return <div className="editor-popover" style={{ left: Math.min(position.x, innerWidth - 310), top: Math.min(position.y, innerHeight - 420) }}>{blockOptions.map(([type, icon, label, help]) => <button key={type} onClick={() => add(type)}><span>{icon}</span><b>{label}</b><small>{help}</small></button>)}</div> }
+function BlockMenu({ position, add, close }) { useEffect(() => { const handler = (e) => { if (!e.target.closest('.editor-popover')) close() }; const timer = setTimeout(() => document.addEventListener('pointerdown', handler), 0); return () => { clearTimeout(timer); document.removeEventListener('pointerdown', handler) } }, [close]); return <div className="editor-popover" style={{ left: Math.max(8, Math.min(position.x, innerWidth - 310)), top: Math.max(8, Math.min(position.y, innerHeight - 420)) }}>{blockOptions.map(([type, icon, label, help]) => <button key={type} onClick={() => add(type)}><span>{icon}</span><b>{label}</b><small>{help}</small></button>)}</div> }
 
 function Trash({ workspace, update }) { const restore = (entry) => update((draft) => { const key = entry.type === 'task' ? 'tasks' : entry.type === 'project' ? 'projects' : 'events'; draft[key].push(entry.item); draft.trash = draft.trash.filter((x) => x.id !== entry.id); return draft }); return <><ViewHead eyebrow="Archivo" title="Papelera" subtitle="Restaura lo eliminado o vacía definitivamente." action={workspace.trash.length ? <button className="ghost danger" onClick={() => update((draft) => { draft.trash = []; return draft })}>Vaciar</button> : null}/><section className="panel"><div className="list">{workspace.trash.map((entry) => <div className="list-row" key={entry.id}><Trash2 size={16}/><div><strong>{entry.item.title || entry.item.name}</strong><div className="top-date">{entry.type}</div></div><button className="ghost" onClick={() => restore(entry)}>Restaurar</button></div>)}{!workspace.trash.length && <Empty text="La papelera está vacía."/>}</div></section></> }
 function Empty({ text }) { return <div className="empty">{text}</div> }
@@ -845,13 +917,14 @@ function ShareModal({ close, space, session, canEdit }) {
   const [role, setRole] = useState('editor'); const [duration, setDuration] = useState('90'); const [busy, setBusy] = useState(false)
   const [error, setError] = useState(''); const [copied, setCopied] = useState('')
   const load = useCallback(async () => {
-    if (!space?.id) return
+    if (!supabaseConfigured || !space?.id) return
     const membersResult = await supabase.from('workspace_members').select('user_id,email,role,joined_at').eq('workspace_id', space.id).order('joined_at')
     if (membersResult.error) setError(membersResult.error.message); else setMembers(membersResult.data || [])
     if (canEdit) { const inviteResult = await supabase.from('workspace_invites').select('*').eq('workspace_id', space.id).or(`expires_at.is.null,expires_at.gt.${new Date().toISOString()}`).order('created_at', { ascending: false }); if (!inviteResult.error) setInvites(inviteResult.data || []) }
   }, [space?.id, canEdit])
   useEffect(() => { load() }, [load])
   async function createInvite() {
+    if (!supabaseConfigured || !space?.id) return
     setBusy(true); setError('')
     const expiresAt = duration === 'never' ? null : new Date(Date.now() + Number(duration) * 86400000).toISOString()
     const { data, error: inviteError } = await supabase.from('workspace_invites').insert({ workspace_id: space.id, role, expires_at: expiresAt, created_by: session.user.id }).select().single()
@@ -860,15 +933,16 @@ function ShareModal({ close, space, session, canEdit }) {
   }
   async function copyInvite(invite) {
     const link = `${window.location.origin}${window.location.pathname}?invite=${invite.code}`
-    await navigator.clipboard.writeText(link); setCopied(invite.id); setTimeout(() => setCopied(''), 1800)
+    try { await navigator.clipboard.writeText(link); setCopied(invite.id); setTimeout(() => setCopied(''), 1800) } catch { setError('No se pudo copiar el enlace. Puedes copiar el código manualmente.') }
   }
+  if (!supabaseConfigured) return <div className="react-modal-backdrop"><div className="react-modal"><div className="modal-head"><h2>Colaboración no disponible</h2><button className="icon-action" onClick={close}><X size={17}/></button></div><div className="modal-body"><p>Este espacio está en modo local. Conecta Supabase para invitar personas y sincronizar cambios.</p></div><div className="modal-actions"><button className="primary" onClick={close}>Entendido</button></div></div></div>
   return <div className="react-modal-backdrop"><div className="react-modal share-modal"><div className="modal-head"><div><h2>Compartir “{space?.name}”</h2><p>Horario, eventos, tareas, páginas y archivos se sincronizan para todo el equipo.</p></div><button className="icon-action" onClick={close}><X size={17}/></button></div><div className="modal-body">{canEdit && <section className="invite-maker"><div><strong>Invitar mediante enlace</strong><small>Elige cuánto tiempo estará disponible. El espacio del equipo no vence.</small></div><label><span>Permiso</span><select value={role} onChange={(e) => setRole(e.target.value)}><option value="editor">Puede editar</option><option value="viewer">Solo lectura</option></select></label><label><span>Duración</span><select value={duration} onChange={(e) => setDuration(e.target.value)}><option value="30">30 días</option><option value="90">90 días</option><option value="365">1 año</option><option value="never">Sin vencimiento</option></select></label><button className="primary" disabled={busy} onClick={createInvite}><Share2 size={15}/> Crear enlace</button></section>}{error && <div className="auth-error">{error}</div>}{invites.length > 0 && <section><h3>Enlaces activos</h3><div className="invite-list">{invites.map((invite) => <div className="invite-row" key={invite.id}><code>{invite.code}</code><span>{invite.role === 'editor' ? 'Editor' : 'Lector'} · {invite.expires_at ? `vence ${new Date(invite.expires_at).toLocaleDateString('es')}` : 'sin vencimiento'} · {invite.uses}/{invite.max_uses} usos</span><button className="ghost" onClick={() => copyInvite(invite)}>{copied === invite.id ? <Check size={15}/> : <Copy size={15}/>} {copied === invite.id ? 'Copiado' : 'Copiar'}</button></div>)}</div></section>}<section><h3>Personas con acceso</h3><div className="member-list">{members.map((member) => <div className="member-row" key={member.user_id}><span className="user-avatar">{member.email.slice(0, 2).toUpperCase()}</span><div><strong>{member.email}</strong><small>{member.user_id === session.user.id ? 'Tú' : 'Miembro'}</small></div><span className="role-pill">{member.role === 'owner' ? 'Propietario' : member.role === 'editor' ? 'Editor' : 'Lector'}</span></div>)}</div></section></div><div className="modal-actions"><button className="primary" onClick={close}>Listo</button></div></div></div>
 }
 
 function FormModal({ title, close, onSubmit, children, extra }) { return <div className="react-modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) close() }}><form className="react-modal" onSubmit={(e) => { e.preventDefault(); onSubmit(new FormData(e.currentTarget)) }}><div className="modal-head"><h2>{title}</h2><button type="button" className="icon-action" aria-label="Cerrar" onClick={close}><X size={17}/></button></div><div className="modal-body">{children}{extra}</div><div className="modal-actions"><button type="button" className="ghost" onClick={close}>Cancelar</button><button className="primary">Guardar</button></div></form></div> }
 function ConfirmModal({ close, confirm, title, children }) { return <div className="react-modal-backdrop"><div className="react-modal"><div className="modal-head"><h2>{title}</h2><button className="icon-action" onClick={close}><X size={17}/></button></div><div className="modal-body"><p>{children}</p></div><div className="modal-actions"><button className="ghost" onClick={close}>Cancelar</button><button className="primary danger-fill" onClick={confirm}>Mover a la papelera</button></div></div></div> }
 function Field({ label, children }) { return <label className="field"><span>{label}</span>{children}</label> }
-function SettingsModal({ close, workspace, update, session }) { const exportData = () => { const url = URL.createObjectURL(new Blob([JSON.stringify(workspace, null, 2)], { type: 'application/json' })); const a = document.createElement('a'); a.href = url; a.download = 'luma-workspace.json'; a.click(); URL.revokeObjectURL(url) }; return <div className="react-modal-backdrop"><div className="react-modal"><div className="modal-head"><h2>Ajustes</h2><button className="icon-action" onClick={close}><X size={17}/></button></div><div className="modal-body"><button className="ghost" onClick={exportData}>Descargar copia de datos</button><button className="ghost danger" onClick={() => update(() => initialWorkspace())}>Restaurar datos de ejemplo</button>{session && <button className="ghost" onClick={() => supabase.auth.signOut()}><LogOut size={15}/> Cerrar sesión</button>}</div><div className="modal-actions"><button className="primary" onClick={close}>Listo</button></div></div></div> }
+function SettingsModal({ close, workspace, update, session }) { const exportData = () => { const url = URL.createObjectURL(new Blob([JSON.stringify(workspace, null, 2)], { type: 'application/json' })); const a = document.createElement('a'); a.href = url; a.download = 'luma-workspace.json'; a.click(); setTimeout(() => URL.revokeObjectURL(url), 0) }; return <div className="react-modal-backdrop"><div className="react-modal"><div className="modal-head"><h2>Ajustes</h2><button className="icon-action" onClick={close}><X size={17}/></button></div><div className="modal-body"><button className="ghost" onClick={exportData}>Descargar copia de datos</button><button className="ghost danger" onClick={() => { if (confirm('¿Restaurar los datos de ejemplo? Se reemplazará el contenido actual del espacio.')) update(() => initialWorkspace()) }}>Restaurar datos de ejemplo</button>{supabaseConfigured && session && <button className="ghost" onClick={() => supabase.auth.signOut()}><LogOut size={15}/> Cerrar sesión</button>}</div><div className="modal-actions"><button className="primary" onClick={close}>Listo</button></div></div></div> }
 
 function clock(minutes) { return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}` }
 function toMinutes(value) { const [hours, minutes] = value.split(':').map(Number); return hours * 60 + minutes }
