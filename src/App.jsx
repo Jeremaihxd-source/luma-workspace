@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  ArrowDown, ArrowUp, Bold, CalendarDays, Check, CheckSquare, ChevronDown, ChevronLeft,
+  ArrowDown, ArrowUp, Bell, BellRing, Bold, CalendarDays, Check, CheckSquare, ChevronDown, ChevronLeft,
   ChevronRight, Cloud, Copy, Download, FileText, Files, FolderKanban,
   GripVertical, Grid3X3, Hand, HardDrive, Home, Image as ImageIcon, Italic, Link as LinkIcon,
   Link2, LogOut, Menu, MoreHorizontal, PenTool, Plus, Search, Settings,
@@ -10,6 +10,9 @@ import { getAuthRedirectUrl, supabase, supabaseConfigured } from './lib/supabase
 import { layoutCalendarEvents } from './calendarLayout'
 import { COLORS, DAYS, initialWorkspace, iso, localDateKey, migrateWorkspace, parseWorkspaceCache, uid } from './state'
 import { normalizeTableData, parseLocalizedNumber, parsePastedGrid, tableToCsv } from './tableUtils'
+import { diffEntityCollection, entitiesFromRows, entityTable, mergeEntityChange, normalizedEntityKeys, snapshotEntities, stripNormalizedEntities } from './entitySync'
+import { defaultNotificationSettings, dueBrowserReminders, pruneSentReminderKeys, reminderItems } from './notificationUtils'
+import { urlBase64ToUint8Array, VAPID_PUBLIC_KEY } from './pushConfig'
 
 const navItems = [
   ['home', Home, 'Inicio'], ['agenda', CalendarDays, 'Agenda'], ['tasks', CheckSquare, 'Tareas'],
@@ -167,7 +170,7 @@ function GoogleMark() {
 }
 
 function Workspace({ session }) {
-  const [view, setView] = useState(() => localStorage.getItem('luma-react-view') || 'home')
+  const [view, setView] = useState(() => new URLSearchParams(window.location.search).get('view') || localStorage.getItem('luma-react-view') || 'home')
   const [agendaMode, setAgendaMode] = useState('calendar')
   const [agendaDate, setAgendaDate] = useState(() => localDateKey(new Date()))
   const [workspace, setWorkspace] = useState(null)
@@ -176,13 +179,25 @@ function Workspace({ session }) {
   const [syncState, setSyncState] = useState('loading')
   const [modal, setModal] = useState(null)
   const [searchOpen, setSearchOpen] = useState(false)
+  const [notificationOpen, setNotificationOpen] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
   const [pagesOpen, setPagesOpen] = useState(true)
   const [sidebarOpen, setSidebarOpen] = useState(() => localStorage.getItem('luma-sidebar-open') !== 'false')
   const [sidebarWidth, setSidebarWidth] = useState(() => clamp(Number(localStorage.getItem('luma-sidebar-width')) || 260, 220, 380))
   const saveTimer = useRef(null)
+  const saveQueue = useRef(Promise.resolve())
   const hydrated = useRef(false)
   const skipNextSave = useRef(false)
+  const normalizedReady = useRef(false)
+  const lastEntities = useRef({ tasks: [], events: [], pages: [] })
+  const entityLoadToken = useRef(0)
+  const notificationStorageKey = `luma-notifications-${session.user.id}`
+  const [notificationSettings, setNotificationSettings] = useState(() => {
+    try { return { ...defaultNotificationSettings, ...JSON.parse(localStorage.getItem(`luma-notifications-${session.user.id}`) || '{}') } } catch { return defaultNotificationSettings }
+  })
+  const [notificationPermission, setNotificationPermission] = useState(() => typeof Notification === 'undefined' ? 'unsupported' : Notification.permission)
+  const [notificationPromptDismissed, setNotificationPromptDismissed] = useState(() => localStorage.getItem(`luma-notification-prompt-${session.user.id}`) === 'dismissed')
+  const [pushState, setPushState] = useState('idle')
   const cacheKey = activeSpaceId ? `luma-space-${activeSpaceId}` : `luma-workspace-${session?.user.id || 'local'}`
 
   useEffect(() => {
@@ -212,6 +227,29 @@ function Workspace({ session }) {
     return next
   }, [activeSpaceId, session.user.id])
 
+  const loadNormalizedWorkspace = useCallback(async (space) => {
+    const base = migrateWorkspace(space.state)
+    if (!supabaseConfigured) return base
+    const results = await Promise.all(normalizedEntityKeys.map((key) => supabase.from(entityTable(key)).select('*').eq('workspace_id', space.id).order('position')))
+    const failure = results.find((result) => result.error)
+    if (failure?.error) throw failure.error
+    const rows = Object.fromEntries(normalizedEntityKeys.map((key, index) => [key, results[index].data || []]))
+    return { ...base, ...entitiesFromRows(rows) }
+  }, [])
+
+  const installWorkspace = useCallback(async (space) => {
+    const token = ++entityLoadToken.current
+    normalizedReady.current = false
+    const next = await loadNormalizedWorkspace(space)
+    if (token !== entityLoadToken.current) return
+    skipNextSave.current = true
+    hydrated.current = true
+    lastEntities.current = snapshotEntities(next)
+    normalizedReady.current = true
+    setWorkspace(next)
+    setSyncState(supabaseConfigured ? 'synced' : 'local')
+  }, [loadNormalizedWorkspace])
+
   useEffect(() => {
     let alive = true
     async function hydrate() {
@@ -220,7 +258,7 @@ function Workspace({ session }) {
           const cached = localStorage.getItem('luma-workspace-local') || localStorage.getItem('luma-workspace-v2')
           const seed = parseWorkspaceCache(cached) || initialWorkspace()
           const localSpace = { id: 'local', name: 'Mi espacio', owner_id: 'local', state: seed, role: 'owner' }
-          hydrated.current = true
+          hydrated.current = true; normalizedReady.current = true; lastEntities.current = snapshotEntities(seed)
           setSpaces([localSpace]); setActiveSpaceId('local'); setWorkspace(seed); setSyncState('local')
           return
         }
@@ -241,7 +279,7 @@ function Workspace({ session }) {
         }
         if (!alive) return
         const selected = nextSpaces.find((space) => space.id === (activeSpaceId || localStorage.getItem('luma-active-space'))) || nextSpaces[0]
-        if (selected) { skipNextSave.current = true; hydrated.current = true; setWorkspace(migrateWorkspace(selected.state)); setSyncState('synced') }
+        if (selected) await installWorkspace(selected)
       } catch (error) { console.error(error); if (alive) setSyncState('error') }
     }
     hydrate(); return () => { alive = false }
@@ -250,10 +288,8 @@ function Workspace({ session }) {
   useEffect(() => {
     const selected = spaces.find((space) => space.id === activeSpaceId)
     if (!selected) return
-    skipNextSave.current = true
-    hydrated.current = true
-    setWorkspace(migrateWorkspace(selected.state))
     localStorage.setItem('luma-active-space', selected.id)
+    installWorkspace(selected).catch((error) => { console.error(error); setSyncState('error') })
   }, [activeSpaceId])
 
   const activeRole = spaces.find((space) => space.id === activeSpaceId)?.role
@@ -262,12 +298,29 @@ function Workspace({ session }) {
     try { localStorage.setItem(cacheKey, JSON.stringify(workspace)) } catch { /* Cloud sync remains available if local storage is full. */ }
     if (skipNextSave.current) { skipNextSave.current = false; return }
     if (!supabaseConfigured) { setSyncState('local'); return }
+    if (!normalizedReady.current) return
     if (activeRole === 'viewer') return
     setSyncState('saving'); clearTimeout(saveTimer.current)
-    saveTimer.current = setTimeout(async () => {
-      const { data, error } = await supabase.from('workspaces').update({ state: workspace }).eq('id', activeSpaceId).select('id, updated_at').maybeSingle()
-      if (!error && data) setSpaces((current) => current.map((space) => space.id === activeSpaceId ? { ...space, state: workspace, updated_at: data.updated_at } : space))
-      setSyncState(error || !data ? 'error' : 'synced')
+    const snapshot = structuredClone(workspace)
+    saveTimer.current = setTimeout(() => {
+      saveQueue.current = saveQueue.current.then(async () => {
+        const baseState = stripNormalizedEntities(snapshot)
+        const entityDiffs = Object.fromEntries(normalizedEntityKeys.map((key) => [key, diffEntityCollection(key, lastEntities.current[key], snapshot[key], activeSpaceId)]))
+        const operations = [supabase.from('workspaces').update({ state: baseState }).eq('id', activeSpaceId).select('id, updated_at').maybeSingle()]
+        for (const key of normalizedEntityKeys) {
+          const diff = entityDiffs[key]
+          if (diff.upserts.length) operations.push(supabase.from(entityTable(key)).upsert(diff.upserts, { onConflict: 'workspace_id,id' }))
+          if (diff.deletes.length) operations.push(supabase.from(entityTable(key)).delete().eq('workspace_id', activeSpaceId).in('id', diff.deletes))
+        }
+        const results = await Promise.all(operations)
+        const workspaceResult = results[0]
+        const error = results.find((result) => result.error)?.error || (!workspaceResult.data ? new Error('No se pudo confirmar el espacio.') : null)
+        if (!error) {
+          lastEntities.current = snapshotEntities(snapshot)
+          setSpaces((current) => current.map((space) => space.id === activeSpaceId ? { ...space, state: baseState, updated_at: workspaceResult.data.updated_at } : space))
+        }
+        setSyncState(error ? 'error' : 'synced')
+      }).catch((error) => { console.error(error); setSyncState('error') })
     }, 600)
     return () => clearTimeout(saveTimer.current)
   }, [workspace, cacheKey, activeSpaceId, activeRole])
@@ -277,10 +330,29 @@ function Workspace({ session }) {
     const channel = supabase.channel(`workspace:${activeSpaceId}`).on('postgres_changes', {
       event: 'UPDATE', schema: 'public', table: 'workspaces', filter: `id=eq.${activeSpaceId}`,
     }, ({ new: next }) => {
-      const incoming = migrateWorkspace(next.state)
-      skipNextSave.current = true; setWorkspace(incoming); setSyncState('synced')
+      skipNextSave.current = true
+      setWorkspace((current) => {
+        if (!current) return migrateWorkspace(next.state)
+        const incoming = migrateWorkspace(next.state)
+        return { ...incoming, tasks: current.tasks, events: current.events, pages: current.pages }
+      })
+      setSyncState('synced')
       setSpaces((current) => current.map((space) => space.id === activeSpaceId ? { ...space, ...next } : space))
-    }).subscribe((status) => {
+    })
+    for (const key of normalizedEntityKeys) {
+      channel.on('postgres_changes', { event: '*', schema: 'public', table: entityTable(key), filter: `workspace_id=eq.${activeSpaceId}` }, (payload) => {
+        skipNextSave.current = true
+        setWorkspace((current) => {
+          if (!current) return current
+          const collection = mergeEntityChange(current[key] || [], key, payload)
+          const next = { ...current, [key]: collection }
+          lastEntities.current = { ...lastEntities.current, [key]: structuredClone(collection) }
+          return next
+        })
+        setSyncState('synced')
+      })
+    }
+    channel.subscribe((status) => {
       if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') setSyncState('error')
     })
     return () => { supabase.removeChannel(channel) }
@@ -312,6 +384,108 @@ function Workspace({ session }) {
     const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); setSidebarWidth((value) => { localStorage.setItem('luma-sidebar-width', String(value)); return value }) }
     window.addEventListener('pointermove', move); window.addEventListener('pointerup', up, { once: true })
   }
+
+  const reminders = useMemo(() => workspace ? reminderItems(workspace, new Date(), notificationSettings.eventLeadMinutes) : [], [workspace, notificationSettings.eventLeadMinutes])
+
+  const saveNotificationSettings = useCallback(async (next) => {
+    setNotificationSettings(next)
+    localStorage.setItem(notificationStorageKey, JSON.stringify(next))
+    if (!supabaseConfigured || !('serviceWorker' in navigator)) return
+    const registration = await navigator.serviceWorker.ready
+    const subscription = await registration.pushManager.getSubscription()
+    if (subscription) {
+      await supabase.from('push_subscriptions').update({
+        enabled: next.enabled,
+        daily_hour: next.dailyHour,
+        event_lead_minutes: next.eventLeadMinutes,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+      }).eq('endpoint', subscription.endpoint)
+    }
+  }, [notificationStorageKey])
+
+  const enableNotifications = useCallback(async () => {
+    if (!('Notification' in window) || !('serviceWorker' in navigator) || !('PushManager' in window)) {
+      setNotificationPermission('unsupported'); setPushState('unsupported'); return false
+    }
+    setPushState('loading')
+    try {
+      const permission = Notification.permission === 'default' ? await Notification.requestPermission() : Notification.permission
+      setNotificationPermission(permission)
+      if (permission !== 'granted') { setPushState(permission === 'denied' ? 'denied' : 'idle'); return false }
+      const registration = await navigator.serviceWorker.ready
+      let subscription = await registration.pushManager.getSubscription()
+      if (supabaseConfigured && !subscription) {
+        subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY) })
+      }
+      const next = { ...notificationSettings, enabled: true }
+      setNotificationSettings(next); localStorage.setItem(notificationStorageKey, JSON.stringify(next))
+      if (supabaseConfigured && subscription) {
+        const json = subscription.toJSON()
+        const { error } = await supabase.from('push_subscriptions').upsert({
+          user_id: session.user.id,
+          endpoint: subscription.endpoint,
+          p256dh: json.keys?.p256dh,
+          auth: json.keys?.auth,
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+          daily_hour: next.dailyHour,
+          event_lead_minutes: next.eventLeadMinutes,
+          enabled: true,
+        }, { onConflict: 'endpoint' })
+        if (error) throw error
+        setPushState('active')
+      } else {
+        setPushState('local')
+      }
+      setNotificationPromptDismissed(true)
+      localStorage.setItem(`luma-notification-prompt-${session.user.id}`, 'dismissed')
+      return true
+    } catch (error) {
+      console.error(error); setPushState('error'); return false
+    }
+  }, [notificationSettings, notificationStorageKey, session.user.id])
+
+  const disableNotifications = useCallback(async () => {
+    setPushState('loading')
+    try {
+      if ('serviceWorker' in navigator) {
+        const registration = await navigator.serviceWorker.ready
+        const subscription = await registration.pushManager.getSubscription()
+        if (subscription) {
+          if (supabaseConfigured) await supabase.from('push_subscriptions').delete().eq('endpoint', subscription.endpoint)
+          await subscription.unsubscribe()
+        }
+      }
+      const next = { ...notificationSettings, enabled: false }
+      setNotificationSettings(next); localStorage.setItem(notificationStorageKey, JSON.stringify(next)); setPushState('idle')
+    } catch (error) { console.error(error); setPushState('error') }
+  }, [notificationSettings, notificationStorageKey])
+
+  useEffect(() => {
+    if (!('serviceWorker' in navigator) || notificationPermission !== 'granted') return
+    navigator.serviceWorker.ready.then((registration) => registration.pushManager.getSubscription()).then((subscription) => {
+      if (subscription && notificationSettings.enabled) setPushState(supabaseConfigured ? 'active' : 'local')
+    }).catch(() => setPushState('error'))
+  }, [notificationPermission, notificationSettings.enabled])
+
+  useEffect(() => {
+    if (!workspace || !notificationSettings.enabled || notificationPermission !== 'granted' || pushState === 'active' || !('serviceWorker' in navigator)) return
+    const sentStorageKey = `luma-reminders-sent-${session.user.id}`
+    const check = async () => {
+      let sent = new Set()
+      try { sent = new Set(JSON.parse(localStorage.getItem(sentStorageKey) || '[]')) } catch { /* Start with an empty history. */ }
+      const due = dueBrowserReminders(workspace, notificationSettings, sent)
+      if (!due.length) return
+      const registration = await navigator.serviceWorker.ready
+      for (const item of due) {
+        await registration.showNotification(item.title, { body: item.body, icon: '/favicon.svg', badge: '/favicon.svg', tag: item.key, data: { url: `/?view=${item.view}` } })
+        sent.add(item.key)
+      }
+      localStorage.setItem(sentStorageKey, JSON.stringify(pruneSentReminderKeys(sent)))
+    }
+    check(); const interval = window.setInterval(check, 30000)
+    return () => window.clearInterval(interval)
+  }, [workspace, notificationSettings, notificationPermission, pushState, session.user.id])
+
   if (!workspace) return <LoadingScreen label="Cargando tus datos…" />
 
   const pending = workspace.tasks.filter((task) => !task.done).length
@@ -328,6 +502,11 @@ function Workspace({ session }) {
   const moveToTrash = (type, item) => update((draft) => {
     const key = type === 'task' ? 'tasks' : type === 'project' ? 'projects' : 'events'
     draft[key] = draft[key].filter((entry) => entry.id !== item.id)
+    if (type === 'task') {
+      draft.projects.forEach((project) => { project.taskIds = (project.taskIds || []).filter((id) => id !== item.id) })
+      draft.pages.forEach((page) => { page.taskIds = (page.taskIds || []).filter((id) => id !== item.id) })
+    }
+    if (type === 'project') draft.pages.forEach((page) => { page.projectIds = (page.projectIds || []).filter((id) => id !== item.id) })
     draft.trash.unshift({ id: uid(), type, item }); return draft
   })
 
@@ -359,9 +538,10 @@ function Workspace({ session }) {
     </aside>
     <div className={`mobile-backdrop ${mobileOpen ? 'open' : ''}`} onClick={() => setMobileOpen(false)} />
     <main className="main">
-      <header className="topbar"><button className="ghost mobile-menu" aria-label="Abrir navegación" onClick={() => setMobileOpen(true)}><Menu size={18}/></button>{!sidebarOpen && <button className="sidebar-reopen" onClick={toggleSidebar} title="Mostrar menú" aria-label="Mostrar menú lateral"><Menu size={18}/></button>}<div className="topbar-title"><span className="page-name">{currentPage ? `${currentPage.icon || '📄'} ${currentPage.title || 'Sin título'}` : viewTitle(view)}</span><span>{activeSpace?.name}</span></div><div className="top-actions"><SyncStatus state={syncState}/><button className={`ghost calendar-top ${view === 'agenda' && agendaMode === 'calendar' ? 'active' : ''}`} onClick={() => { go('agenda'); setAgendaMode(agendaMode === 'calendar' && view === 'agenda' ? 'schedule' : 'calendar') }}><CalendarDays size={15}/> {view === 'agenda' && agendaMode === 'calendar' ? 'Horario' : 'Calendario'}</button><button className="square top-search" aria-label="Buscar" title="Buscar" onClick={() => setSearchOpen(true)}><Search size={17}/></button>{canEdit && <ActionMenu align="right" className="top-create" trigger={<><Plus size={16}/><span>Crear</span><ChevronDown size={14}/></>} items={createActions}/>}<ActionMenu align="right" ariaLabel="Más opciones" trigger={<MoreHorizontal size={18}/>} items={[{ icon: Share2, label: 'Compartir espacio', onSelect: () => setModal({ type: 'share' }) }, { icon: Settings, label: 'Ajustes', onSelect: () => setModal({ type: 'settings' }) }]}/></div></header>
+      <header className="topbar"><button className="ghost mobile-menu" aria-label="Abrir navegación" onClick={() => setMobileOpen(true)}><Menu size={18}/></button>{!sidebarOpen && <button className="sidebar-reopen" onClick={toggleSidebar} title="Mostrar menú" aria-label="Mostrar menú lateral"><Menu size={18}/></button>}<div className="topbar-title"><span className="page-name">{currentPage ? `${currentPage.icon || '📄'} ${currentPage.title || 'Sin título'}` : viewTitle(view)}</span><span>{activeSpace?.name}</span></div><div className="top-actions"><SyncStatus state={syncState}/><button className={`ghost calendar-top ${view === 'agenda' && agendaMode === 'calendar' ? 'active' : ''}`} onClick={() => { go('agenda'); setAgendaMode(agendaMode === 'calendar' && view === 'agenda' ? 'schedule' : 'calendar') }}><CalendarDays size={15}/> {view === 'agenda' && agendaMode === 'calendar' ? 'Horario' : 'Calendario'}</button><button className={`square notification-button ${notificationOpen ? 'active' : ''}`} aria-label="Abrir notificaciones" title="Notificaciones" onClick={() => setNotificationOpen((value) => !value)}>{notificationSettings.enabled ? <BellRing size={17}/> : <Bell size={17}/>} {reminders.length > 0 && <span>{Math.min(9, reminders.length)}</span>}</button><button className="square top-search" aria-label="Buscar" title="Buscar" onClick={() => setSearchOpen(true)}><Search size={17}/></button>{canEdit && <ActionMenu align="right" className="top-create" trigger={<><Plus size={16}/><span>Crear</span><ChevronDown size={14}/></>} items={createActions}/>}<ActionMenu align="right" ariaLabel="Más opciones" trigger={<MoreHorizontal size={18}/>} items={[{ icon: Share2, label: 'Compartir espacio', onSelect: () => setModal({ type: 'share' }) }, { icon: Settings, label: 'Ajustes', onSelect: () => setModal({ type: 'settings' }) }]}/></div></header>
       <div className="content">
         {!supabaseConfigured && <div className="notice-banner">Modo local activo. Conecta Supabase para habilitar cuentas y sincronización entre dispositivos.</div>}
+        {!notificationPromptDismissed && notificationPermission === 'default' && <div className="notification-invite"><BellRing size={20}/><div><strong>Recibe recordatorios a tiempo</strong><span>Avisos de tareas pendientes y eventos, incluso cuando Luma no esté abierta.</span></div><button className="primary" onClick={enableNotifications}>Activar</button><button className="icon-action" aria-label="Ahora no" onClick={() => { setNotificationPromptDismissed(true); localStorage.setItem(`luma-notification-prompt-${session.user.id}`, 'dismissed') }}><X size={16}/></button></div>}
         {view === 'home' && <Dashboard workspace={workspace} go={go} update={update}/>} 
         {view === 'agenda' && <Agenda workspace={workspace} update={update} setModal={setModal} mode={agendaMode} setMode={setAgendaMode} selectedDate={agendaDate} setSelectedDate={setAgendaDate}/>}
         {view === 'tasks' && <Tasks workspace={workspace} update={update} setModal={setModal}/>} 
@@ -373,8 +553,20 @@ function Workspace({ session }) {
         {currentPage && <Notes key={`${activeSpaceId}:${currentPage.id}`} workspace={workspace} update={update} pageId={currentPage.id}/>}
       </div>
     </main>
+    {notificationOpen && <NotificationCenter
+      reminders={reminders} settings={notificationSettings} permission={notificationPermission} pushState={pushState}
+      enable={enableNotifications} disable={disableNotifications} close={() => setNotificationOpen(false)}
+      go={(target) => { go(target); setNotificationOpen(false) }}
+      completeTask={(id) => update((draft) => { const task = draft.tasks.find((item) => item.id === id); if (task) task.done = true; return draft })}
+    />}
     {searchOpen && <SearchPalette workspace={workspace} go={go} close={() => setSearchOpen(false)}/>} 
-    {modal && <ModalController modal={modal} close={() => setModal(null)} workspace={workspace} update={update} moveToTrash={moveToTrash} session={session} activeSpace={activeSpace} createSpace={createSpace} joinSpace={joinSpace} canEdit={canEdit}/>}
+    {modal && <ModalController
+      modal={modal} close={() => setModal(null)} workspace={workspace} update={update} moveToTrash={moveToTrash}
+      session={session} activeSpace={activeSpace} createSpace={createSpace} joinSpace={joinSpace} canEdit={canEdit}
+      notificationSettings={notificationSettings} saveNotificationSettings={saveNotificationSettings}
+      notificationPermission={notificationPermission} pushState={pushState}
+      enableNotifications={enableNotifications} disableNotifications={disableNotifications}
+    />}
   </div>
 }
 
@@ -894,7 +1086,7 @@ function SearchPalette({ workspace, go, close }) {
   return <div className="search-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) close() }}><div className="palette"><input autoFocus value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Buscar tareas, proyectos, notas y bloques…"/><div className="results">{results.map((result, index) => <button className="result" key={`${result.view}-${index}`} onClick={() => { go(result.view); close() }}><Search size={15}/><strong>{result.label}</strong><small>{result.type}</small></button>)}{!results.length && <Empty text="No hay resultados."/>}</div></div></div>
 }
 
-function ModalController({ modal, close, workspace, update, moveToTrash, session, activeSpace, createSpace, joinSpace, canEdit }) {
+function ModalController({ modal, close, workspace, update, moveToTrash, session, activeSpace, createSpace, joinSpace, canEdit, notificationSettings, saveNotificationSettings, notificationPermission, pushState, enableNotifications, disableNotifications }) {
   if (modal.type === 'task') return <FormModal title="Nueva tarea" close={close} onSubmit={(form) => { update((draft) => { const task = { id: uid(), title: form.get('title'), date: form.get('date'), priority: form.get('priority'), done: false }; draft.tasks.unshift(task); const projectId = form.get('project'); if (projectId) draft.projects.find((project) => project.id === projectId).taskIds.push(task.id); return draft }); close() }}><Field label="Título"><input name="title" required autoFocus placeholder="¿Qué necesitas hacer?"/></Field><div className="field-row"><Field label="Fecha"><input name="date" type="date" defaultValue={modal.draft?.date || iso()}/></Field><Field label="Prioridad"><select name="priority" defaultValue="Media"><option>Alta</option><option>Media</option><option>Baja</option></select></Field></div><Field label="Proyecto"><select name="project" defaultValue=""><option value="">Sin proyecto</option>{workspace.projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></Field></FormModal>
   if (modal.type === 'project') return <FormModal title="Nuevo proyecto" close={close} onSubmit={(form) => { update((draft) => { draft.projects.unshift({ id: uid(), name: form.get('name'), description: form.get('description'), symbol: form.get('symbol'), taskIds: [] }); return draft }); close() }}><Field label="Nombre"><input name="name" required autoFocus/></Field><Field label="Descripción"><textarea name="description" rows="3"/></Field><Field label="Símbolo"><select name="symbol"><option>◎</option><option>◇</option><option>↗</option><option>✦</option></select></Field></FormModal>
   if (modal.type === 'event') { const item = modal.item ?? modal.draft ?? {}; return <FormModal title={modal.item ? 'Editar bloque' : 'Nuevo bloque'} close={close} onSubmit={(form) => { const date = form.get('date'); const values = { title: form.get('title'), date, day: dayIndex(parseDate(date)), color: form.get('color'), start: toMinutes(form.get('start')), duration: Number(form.get('duration')) }; update((draft) => { if (modal.item) Object.assign(draft.events.find((x) => x.id === modal.item.id), values); else draft.events.push({ id: uid(), ...values }); return draft }); close() }} extra={modal.item && <button type="button" className="ghost danger" onClick={() => { close(); setTimeout(() => {}, 0); moveToTrash('event', modal.item) }}>Mover a papelera</button>}><Field label="Título"><input name="title" required autoFocus defaultValue={item.title || ''}/></Field><div className="field-row"><Field label="Fecha"><input type="date" name="date" defaultValue={item.date || iso()} required/></Field><Field label="Color"><select name="color" defaultValue={item.color || 'blue'}>{COLORS.map((color) => <option key={color} value={color}>{colorNames[color]}</option>)}</select></Field></div><div className="field-row"><Field label="Inicio"><input type="time" name="start" defaultValue={clock(item.start ?? 540)} required/></Field><Field label="Duración"><select name="duration" defaultValue={item.duration ?? 60}><option value="30">30 min</option><option value="45">45 min</option><option value="60">1 hora</option><option value="90">1 h 30</option><option value="120">2 horas</option><option value="180">3 horas</option><option value="240">4 horas</option></select></Field></div></FormModal> }
@@ -903,8 +1095,20 @@ function ModalController({ modal, close, workspace, update, moveToTrash, session
   if (modal.type === 'createSpace') return <WorkspaceActionModal title="Nuevo espacio de trabajo" submitLabel="Crear espacio" close={close} onSubmit={async (value) => createSpace(value)} label="Nombre del espacio" placeholder="Ej. Equipo de marketing"/>
   if (modal.type === 'joinSpace') return <WorkspaceActionModal title="Unirme a un espacio" submitLabel="Unirme" close={close} onSubmit={joinSpace} label="Código o enlace de invitación" placeholder="Pega aquí el código o el enlace"/>
   if (modal.type === 'share') return <ShareModal close={close} space={activeSpace} session={session} canEdit={canEdit}/>
-  if (modal.type === 'settings') return <SettingsModal close={close} workspace={workspace} update={update} session={session}/>
+  if (modal.type === 'settings') return <SettingsModal close={close} workspace={workspace} update={update} session={session} notificationSettings={notificationSettings} saveNotificationSettings={saveNotificationSettings} notificationPermission={notificationPermission} pushState={pushState} enableNotifications={enableNotifications} disableNotifications={disableNotifications}/>
   return null
+}
+
+function NotificationCenter({ reminders, settings, permission, pushState, enable, disable, close, go, completeTask }) {
+  const status = pushState === 'active' ? 'Push programado activo' : pushState === 'local' ? 'Avisos mientras Luma esté abierta' : permission === 'denied' ? 'Permiso bloqueado en el navegador' : 'Recordatorios desactivados'
+  return <aside className="notification-center" aria-label="Centro de notificaciones">
+    <header><div><strong>Notificaciones</strong><span>{status}</span></div><button className="icon-action" aria-label="Cerrar" onClick={close}><X size={16}/></button></header>
+    <div className="notification-list">
+      {reminders.map((item) => <div className={`notification-item ${item.urgency === 0 ? 'urgent' : ''}`} key={item.id}><span className="notification-kind">{item.kind === 'task' ? <CheckSquare size={15}/> : <CalendarDays size={15}/>}</span><button className="notification-copy" onClick={() => go(item.kind === 'task' ? 'tasks' : 'agenda')}><strong>{item.title}</strong><small>{item.detail}</small></button>{item.kind === 'task' && <button className="notification-done" title="Marcar como hecha" aria-label={`Completar ${item.title}`} onClick={() => completeTask(item.itemId)}><Check size={15}/></button>}</div>)}
+      {!reminders.length && <div className="notification-empty"><Bell size={22}/><strong>Todo al día</strong><span>No tienes tareas vencidas ni eventos próximos.</span></div>}
+    </div>
+    <footer>{settings.enabled ? <button className="ghost" onClick={disable}>Desactivar avisos</button> : <button className="primary" disabled={pushState === 'loading' || permission === 'denied'} onClick={enable}>{pushState === 'loading' ? 'Activando…' : 'Activar recordatorios'}</button>}</footer>
+  </aside>
 }
 
 function WorkspaceActionModal({ title, submitLabel, close, onSubmit, label, placeholder }) {
@@ -942,7 +1146,17 @@ function ShareModal({ close, space, session, canEdit }) {
 function FormModal({ title, close, onSubmit, children, extra }) { return <div className="react-modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) close() }}><form className="react-modal" onSubmit={(e) => { e.preventDefault(); onSubmit(new FormData(e.currentTarget)) }}><div className="modal-head"><h2>{title}</h2><button type="button" className="icon-action" aria-label="Cerrar" onClick={close}><X size={17}/></button></div><div className="modal-body">{children}{extra}</div><div className="modal-actions"><button type="button" className="ghost" onClick={close}>Cancelar</button><button className="primary">Guardar</button></div></form></div> }
 function ConfirmModal({ close, confirm, title, children }) { return <div className="react-modal-backdrop"><div className="react-modal"><div className="modal-head"><h2>{title}</h2><button className="icon-action" onClick={close}><X size={17}/></button></div><div className="modal-body"><p>{children}</p></div><div className="modal-actions"><button className="ghost" onClick={close}>Cancelar</button><button className="primary danger-fill" onClick={confirm}>Mover a la papelera</button></div></div></div> }
 function Field({ label, children }) { return <label className="field"><span>{label}</span>{children}</label> }
-function SettingsModal({ close, workspace, update, session }) { const exportData = () => { const url = URL.createObjectURL(new Blob([JSON.stringify(workspace, null, 2)], { type: 'application/json' })); const a = document.createElement('a'); a.href = url; a.download = 'luma-workspace.json'; a.click(); setTimeout(() => URL.revokeObjectURL(url), 0) }; return <div className="react-modal-backdrop"><div className="react-modal"><div className="modal-head"><h2>Ajustes</h2><button className="icon-action" onClick={close}><X size={17}/></button></div><div className="modal-body"><button className="ghost" onClick={exportData}>Descargar copia de datos</button><button className="ghost danger" onClick={() => { if (confirm('¿Restaurar los datos de ejemplo? Se reemplazará el contenido actual del espacio.')) update(() => initialWorkspace()) }}>Restaurar datos de ejemplo</button>{supabaseConfigured && session && <button className="ghost" onClick={() => supabase.auth.signOut()}><LogOut size={15}/> Cerrar sesión</button>}</div><div className="modal-actions"><button className="primary" onClick={close}>Listo</button></div></div></div> }
+function SettingsModal({ close, workspace, update, session, notificationSettings, saveNotificationSettings, notificationPermission, pushState, enableNotifications, disableNotifications }) {
+  const exportData = () => { const url = URL.createObjectURL(new Blob([JSON.stringify(workspace, null, 2)], { type: 'application/json' })); const a = document.createElement('a'); a.href = url; a.download = 'luma-workspace.json'; a.click(); setTimeout(() => URL.revokeObjectURL(url), 0) }
+  const changeSetting = (key, value) => saveNotificationSettings({ ...notificationSettings, [key]: Number(value) })
+  return <div className="react-modal-backdrop"><div className="react-modal settings-modal"><div className="modal-head"><h2>Ajustes</h2><button className="icon-action" onClick={close}><X size={17}/></button></div><div className="modal-body">
+    <section className="settings-section"><div className="settings-title"><span><BellRing size={17}/></span><div><strong>Recordatorios</strong><small>{pushState === 'active' ? 'Se enviarán aunque cierres Luma.' : notificationPermission === 'denied' ? 'Debes habilitar el permiso desde el navegador.' : 'Organiza tus tareas y eventos sin perder fechas.'}</small></div></div>
+      <div className="notification-preferences"><label><span>Resumen diario</span><select value={notificationSettings.dailyHour} onChange={(event) => changeSetting('dailyHour', event.target.value)}>{[7,8,9,10,12,18,20].map((hour) => <option value={hour} key={hour}>{String(hour).padStart(2, '0')}:00</option>)}</select></label><label><span>Avisar antes de eventos</span><select value={notificationSettings.eventLeadMinutes} onChange={(event) => changeSetting('eventLeadMinutes', event.target.value)}>{[10,15,30,60,120].map((minutes) => <option value={minutes} key={minutes}>{minutes < 60 ? `${minutes} minutos` : `${minutes / 60} hora${minutes > 60 ? 's' : ''}`}</option>)}</select></label></div>
+      {notificationSettings.enabled ? <button className="ghost" disabled={pushState === 'loading'} onClick={disableNotifications}>Desactivar recordatorios</button> : <button className="primary" disabled={pushState === 'loading' || notificationPermission === 'denied'} onClick={enableNotifications}>{pushState === 'loading' ? 'Activando…' : 'Activar recordatorios'}</button>}
+    </section>
+    <section className="settings-section"><strong>Datos y cuenta</strong><div className="settings-actions"><button className="ghost" onClick={exportData}><Download size={15}/> Descargar copia de datos</button><button className="ghost danger" onClick={() => { if (confirm('¿Restaurar los datos de ejemplo? Se reemplazará el contenido actual del espacio.')) update(() => initialWorkspace()) }}>Restaurar datos de ejemplo</button>{supabaseConfigured && session && <button className="ghost" onClick={() => supabase.auth.signOut()}><LogOut size={15}/> Cerrar sesión</button>}</div></section>
+  </div><div className="modal-actions"><button className="primary" onClick={close}>Listo</button></div></div></div>
+}
 
 function clock(minutes) { return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}` }
 function toMinutes(value) { const [hours, minutes] = value.split(':').map(Number); return hours * 60 + minutes }
