@@ -10,6 +10,7 @@ import { getAuthRedirectUrl, supabase, supabaseConfigured } from './lib/supabase
 import { layoutCalendarEvents } from './calendarLayout'
 import { COLORS, DAYS, initialWorkspace, iso, localDateKey, migrateWorkspace, parseWorkspaceCache, uid } from './state'
 import { normalizeTableData, parseLocalizedNumber, parsePastedGrid, tableToCsv } from './tableUtils'
+import { automaticBlockType, continuationBlockType, numberedBlockPosition } from './editorUtils'
 import { diffEntityCollection, entitiesFromRows, entityTable, mergeEntityChange, normalizedEntityKeys, snapshotEntities, stripNormalizedEntities } from './entitySync'
 import { defaultNotificationSettings, dueBrowserReminders, pruneSentReminderKeys, reminderItems } from './notificationUtils'
 import { urlBase64ToUint8Array, VAPID_PUBLIC_KEY } from './pushConfig'
@@ -377,6 +378,14 @@ function Workspace({ session }) {
 
   const go = (next) => { setView(next); localStorage.setItem('luma-react-view', next); setMobileOpen(false) }
   const toggleSidebar = () => setSidebarOpen((value) => { localStorage.setItem('luma-sidebar-open', String(!value)); return !value })
+  const closeSidebarForWideContent = useCallback(() => {
+    if (window.innerWidth <= 760) return
+    setSidebarOpen((value) => {
+      if (!value) return value
+      localStorage.setItem('luma-sidebar-open', 'false')
+      return false
+    })
+  }, [])
   const resizeSidebar = (event) => {
     event.preventDefault()
     const startX = event.clientX; const startWidth = sidebarWidth
@@ -546,11 +555,11 @@ function Workspace({ session }) {
         {view === 'agenda' && <Agenda workspace={workspace} update={update} setModal={setModal} mode={agendaMode} setMode={setAgendaMode} selectedDate={agendaDate} setSelectedDate={setAgendaDate}/>}
         {view === 'tasks' && <Tasks workspace={workspace} update={update} setModal={setModal}/>} 
         {view === 'projects' && <Projects workspace={workspace} update={update} setModal={setModal}/>} 
-        {view === 'notes' && <Notes key={`${activeSpaceId}:notes`} workspace={workspace} update={update}/>}
+        {view === 'notes' && <Notes key={`${activeSpaceId}:notes`} workspace={workspace} update={update} onRequestWide={closeSidebarForWideContent}/>}
         {view === 'ideas' && <IdeasBoard workspace={workspace} update={update} go={go} syncState={syncState} setModal={setModal}/>}
         {view === 'files' && <WorkspaceFiles space={activeSpace} canEdit={canEdit} session={session}/>}
         {view === 'trash' && <Trash workspace={workspace} update={update}/>} 
-        {currentPage && <Notes key={`${activeSpaceId}:${currentPage.id}`} workspace={workspace} update={update} pageId={currentPage.id}/>}
+        {currentPage && <Notes key={`${activeSpaceId}:${currentPage.id}`} workspace={workspace} update={update} pageId={currentPage.id} onRequestWide={closeSidebarForWideContent}/>}
       </div>
     </main>
     {notificationOpen && <NotificationCenter
@@ -915,7 +924,7 @@ function WorkspaceFiles({ space, canEdit, session }) {
   return <><ViewHead eyebrow="Equipo" title="Archivos compartidos" subtitle="Documentos privados para todas las personas de este espacio." action={canEdit && <><input ref={input} hidden type="file" onChange={upload}/><button className="primary" disabled={busy} onClick={() => input.current?.click()}><Upload size={15}/>{busy ? ' Subiendo…' : ' Subir archivo'}</button></>}/>{message && <div className="notice-banner">{message}</div>}<section className="panel"><div className="file-list">{files.map((file) => <div className="file-row" key={file.id}><span className="file-icon"><FileText size={18}/></span><div><strong>{file.name}</strong><small>{formatBytes(file.size_bytes)} · {new Date(file.created_at).toLocaleDateString('es')}</small></div><button className="ghost" onClick={() => download(file)}><Download size={15}/> Descargar</button>{canEdit && <button className="icon-action" title="Eliminar" onClick={() => remove(file)}><Trash2 size={15}/></button>}</div>)}{!files.length && <Empty text="Aún no hay archivos. Sube el primero para compartirlo con el equipo."/>}</div></section></>
 }
 
-function Notes({ workspace, update, pageId = null }) {
+function Notes({ workspace, update, pageId = null, onRequestWide }) {
   const [menu, setMenu] = useState(null)
   const [coverOpen, setCoverOpen] = useState(false)
   const activeBlock = useRef(null)
@@ -956,8 +965,8 @@ function Notes({ workspace, update, pageId = null }) {
       {pageId && (
         <PageRelations page={doc} workspace={workspace} update={update}/>
       )}
-      <div className="format-bar"><select className="format-select" aria-label="Estilo de texto" defaultValue="text" onChange={(e) => patchActiveBlock({ type: e.target.value })}><option value="text">Texto</option><option value="h1">Título</option><option value="h2">Subtítulo</option><option value="bullet">Lista</option><option value="quote">Cita</option><option value="callout">Aviso</option></select><span className="format-separator"/><FormatButton title="Negrita" onClick={() => format('bold')}><Bold size={15}/></FormatButton><FormatButton title="Cursiva" onClick={() => format('italic')}><Italic size={15}/></FormatButton><FormatButton title="Subrayado" onClick={() => format('underline')}><Underline size={15}/></FormatButton><FormatButton title="Tachado" onClick={() => format('strikeThrough')}>S̶</FormatButton><span className="format-separator"/><FormatButton title="Alinear a la izquierda" onClick={() => patchActiveBlock({ align: 'left' })}>≡</FormatButton><FormatButton title="Centrar" onClick={() => patchActiveBlock({ align: 'center' })}>≣</FormatButton><FormatButton title="Alinear a la derecha" onClick={() => patchActiveBlock({ align: 'right' })}>≡</FormatButton><label className="text-color" title="Color del texto"><input type="color" defaultValue="#24251f" onChange={(e) => patchActiveBlock({ textColor: e.target.value })}/></label><FormatButton title="Enlace" onClick={() => format('createLink')}><LinkIcon size={15}/> Enlace</FormatButton><FormatButton title="Limpiar formato" onClick={() => { format('removeFormat'); patchActiveBlock({ align: 'left', textColor: '' }) }}>Tx</FormatButton><button className="insert-main" onClick={(e) => setMenu({ x: e.clientX, y: e.clientY + 12, after: null })}><Plus size={14}/> Insertar bloque</button></div>
-      <div className="notion-editor">{blocks.map((block) => <RichBlock key={block.id} block={block} update={update} activeBlock={activeBlock} getDocument={getDocument} openMenu={(element) => { const rect = element.getBoundingClientRect(); setMenu({ x: rect.left, y: rect.bottom + 6, after: block.id }) }}/>)}</div>
+      <div className="format-bar"><select className="format-select" aria-label="Estilo de texto" defaultValue="text" onChange={(e) => patchActiveBlock({ type: e.target.value })}><option value="text">Texto</option><option value="h1">Título</option><option value="h2">Subtítulo</option><option value="bullet">Lista con viñetas</option><option value="numbered">Lista numerada</option><option value="quote">Cita</option><option value="callout">Aviso</option></select><span className="format-separator"/><FormatButton title="Negrita" onClick={() => format('bold')}><Bold size={15}/></FormatButton><FormatButton title="Cursiva" onClick={() => format('italic')}><Italic size={15}/></FormatButton><FormatButton title="Subrayado" onClick={() => format('underline')}><Underline size={15}/></FormatButton><FormatButton title="Tachado" onClick={() => format('strikeThrough')}>S̶</FormatButton><span className="format-separator"/><FormatButton title="Alinear a la izquierda" onClick={() => patchActiveBlock({ align: 'left' })}>≡</FormatButton><FormatButton title="Centrar" onClick={() => patchActiveBlock({ align: 'center' })}>≣</FormatButton><FormatButton title="Alinear a la derecha" onClick={() => patchActiveBlock({ align: 'right' })}>≡</FormatButton><label className="text-color" title="Color del texto"><input type="color" defaultValue="#24251f" onChange={(e) => patchActiveBlock({ textColor: e.target.value })}/></label><FormatButton title="Enlace" onClick={() => format('createLink')}><LinkIcon size={15}/> Enlace</FormatButton><FormatButton title="Limpiar formato" onClick={() => { format('removeFormat'); patchActiveBlock({ align: 'left', textColor: '' }) }}>Tx</FormatButton><button className="insert-main" onClick={(e) => setMenu({ x: e.clientX, y: e.clientY + 12, after: null })}><Plus size={14}/> Insertar bloque</button></div>
+      <div className="notion-editor">{blocks.map((block, index) => <RichBlock key={block.id} block={block} listNumber={numberedBlockPosition(blocks, index)} update={update} activeBlock={activeBlock} getDocument={getDocument} onRequestWide={onRequestWide} openMenu={(element) => { const rect = element.getBoundingClientRect(); setMenu({ x: rect.left, y: rect.bottom + 6, after: block.id }) }}/>)}</div>
       <button className="add-last" onClick={() => addBlock('text', blocks.at(-1)?.id)}><Plus size={14}/> Añadir bloque</button>
     </article>{menu && <BlockMenu position={menu} add={addBlock} close={() => setMenu(null)}/>}</div>
 }
@@ -973,46 +982,148 @@ function PageRelations({ page, workspace, update }) {
 }
 
 function FormatButton({ title, onClick, children }) { return <button title={title} onMouseDown={(e) => e.preventDefault()} onClick={onClick}>{children}</button> }
-function RichBlock({ block, update, activeBlock, openMenu, getDocument }) {
+function richCaretOffset(element) {
+  const selection = window.getSelection()
+  if (!selection?.rangeCount) return element.innerText.length
+  const range = selection.getRangeAt(0)
+  if (!element.contains(range.startContainer)) return element.innerText.length
+  const before = range.cloneRange()
+  before.selectNodeContents(element)
+  before.setEnd(range.startContainer, range.startOffset)
+  return before.toString().length
+}
+
+function splitRichContent(element) {
+  const selection = window.getSelection()
+  if (!selection?.rangeCount) return { beforeHtml: sanitizeRich(element.innerHTML), beforeText: element.innerText, afterHtml: '', afterText: '' }
+  const caret = selection.getRangeAt(0)
+  if (!element.contains(caret.startContainer)) return { beforeHtml: sanitizeRich(element.innerHTML), beforeText: element.innerText, afterHtml: '', afterText: '' }
+  const beforeRange = caret.cloneRange()
+  beforeRange.selectNodeContents(element)
+  beforeRange.setEnd(caret.startContainer, caret.startOffset)
+  const afterRange = caret.cloneRange()
+  afterRange.selectNodeContents(element)
+  afterRange.setStart(caret.startContainer, caret.startOffset)
+  const before = document.createElement('div')
+  const after = document.createElement('div')
+  before.append(beforeRange.cloneContents())
+  after.append(afterRange.cloneContents())
+  return {
+    beforeHtml: sanitizeRich(before.innerHTML),
+    beforeText: before.textContent || '',
+    afterHtml: sanitizeRich(after.innerHTML),
+    afterText: after.textContent || '',
+  }
+}
+
+function focusEditableEnd(element) {
+  if (!element) return
+  element.focus()
+  const range = document.createRange()
+  range.selectNodeContents(element)
+  range.collapse(false)
+  const selection = window.getSelection()
+  selection.removeAllRanges()
+  selection.addRange(range)
+}
+
+function focusRichBlock(id, atEnd = false) {
+  const element = document.querySelector(`[data-rich-block="${id}"]`)
+  if (!element) return
+  if (atEnd) focusEditableEnd(element)
+  else {
+    element.focus()
+    const range = document.createRange()
+    range.selectNodeContents(element)
+    range.collapse(true)
+    const selection = window.getSelection()
+    selection.removeAllRanges()
+    selection.addRange(range)
+  }
+}
+
+function RichBlock({ block, listNumber, update, activeBlock, openMenu, getDocument, onRequestWide }) {
   const updateContent = (element) => update((draft) => { const target = getDocument(draft).blocks.find((x) => x.id === block.id); if (target) { target.content = element.innerText; target.html = sanitizeRich(element.innerHTML) } return draft })
   const remove = () => update((draft) => { const doc = getDocument(draft); doc.blocks = doc.blocks.length === 1 ? [{ id: uid(), type: 'text', content: '' }] : doc.blocks.filter((x) => x.id !== block.id); return draft })
   const move = (amount) => update((draft) => { const blocks = getDocument(draft).blocks; const index = blocks.findIndex((item) => item.id === block.id); const next = clamp(index + amount, 0, blocks.length - 1); if (next !== index) blocks.splice(next, 0, blocks.splice(index, 1)[0]); return draft })
   const duplicate = () => update((draft) => { const blocks = getDocument(draft).blocks; const index = blocks.findIndex((item) => item.id === block.id); blocks.splice(index + 1, 0, { ...structuredClone(block), id: uid() }); return draft })
+  const convertBlock = (type, element) => {
+    element.innerHTML = ''
+    update((draft) => {
+      const target = getDocument(draft).blocks.find((item) => item.id === block.id)
+      if (!target) return draft
+      target.type = type
+      target.content = ''
+      target.html = ''
+      if (type === 'todo') target.checked = false
+      else delete target.checked
+      return draft
+    })
+    activeBlock.current = block.id
+    setTimeout(() => focusRichBlock(block.id), 0)
+  }
   const handleKeys = (event) => {
+    const element = event.currentTarget
+    if (event.isComposing) return
+    if (event.key === ' ' && block.type === 'text') {
+      const selection = window.getSelection()
+      const shortcutType = automaticBlockType(element.innerText)
+      if (shortcutType && selection?.isCollapsed && richCaretOffset(element) === element.innerText.length) {
+        event.preventDefault()
+        convertBlock(shortcutType, element)
+        return
+      }
+    }
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
+      if (['bullet', 'numbered', 'todo'].includes(block.type) && !element.innerText.trim()) {
+        convertBlock('text', element)
+        return
+      }
       const nextId = uid()
-      const element = event.currentTarget
+      const split = splitRichContent(element)
+      const nextType = continuationBlockType(block.type)
+      // Keep the DOM in sync before focus moves. Otherwise the ensuing blur can
+      // persist the unsplit value and overwrite the state update below.
+      element.innerHTML = split.beforeHtml
       update((draft) => {
         const blocks = getDocument(draft).blocks
         const index = blocks.findIndex((item) => item.id === block.id)
         if (index < 0) return draft
-        blocks[index].content = element.innerText
-        blocks[index].html = sanitizeRich(element.innerHTML)
-        blocks.splice(index + 1, 0, { id: nextId, type: block.type === 'bullet' ? 'bullet' : 'text', content: '' })
+        blocks[index].content = split.beforeText
+        blocks[index].html = split.beforeHtml
+        const nextBlock = { id: nextId, type: nextType, content: split.afterText, html: split.afterHtml }
+        if (nextType === 'todo') nextBlock.checked = false
+        blocks.splice(index + 1, 0, nextBlock)
         return draft
       })
       activeBlock.current = nextId
-      setTimeout(() => document.querySelector(`[data-rich-block="${nextId}"]`)?.focus(), 0)
-    } else if (event.key === 'Backspace' && !event.currentTarget.innerText) {
-      const blocks = event.currentTarget.closest('.notion-editor')?.querySelectorAll('[data-rich-block]')
+      setTimeout(() => focusRichBlock(nextId), 0)
+    } else if (event.key === 'Backspace' && !element.innerText) {
+      if (['bullet', 'numbered', 'todo'].includes(block.type)) {
+        event.preventDefault()
+        convertBlock('text', element)
+        return
+      }
+      const blocks = element.closest('.notion-editor')?.querySelectorAll('[data-rich-block]')
       if (!blocks || blocks.length <= 1) return
       event.preventDefault()
-      const previous = event.currentTarget.closest('.note-block')?.previousElementSibling?.querySelector('[data-rich-block]')
+      const previous = element.closest('.note-block')?.previousElementSibling?.querySelector('[data-rich-block]')
       remove()
-      setTimeout(() => previous?.focus(), 0)
+      setTimeout(() => focusEditableEnd(previous), 0)
     }
   }
   const controls = <div className="block-controls"><button title="Subir bloque" onClick={() => move(-1)}><ArrowUp size={13}/></button><button title="Bajar bloque" onClick={() => move(1)}><ArrowDown size={13}/></button><button title="Duplicar bloque" onClick={duplicate}><Copy size={13}/></button><button className="danger" title="Eliminar bloque" onClick={remove}><Trash2 size={13}/></button></div>
   if (block.type === 'divider') return <div className="note-block divider-block"><GripVertical className="block-grip" size={15}/><hr/>{controls}</div>
-  if (block.type === 'table') return <SmartTable block={block} update={update} getDocument={getDocument} controls={controls}/>
+  if (block.type === 'table') return <SmartTable block={block} update={update} getDocument={getDocument} controls={controls} onRequestWide={onRequestWide}/>
   const Tag = block.type === 'h1' ? 'h2' : block.type === 'h2' ? 'h3' : 'div'
-  return <div className={`note-block type-${block.type}`}><GripVertical className="block-grip" size={15}/>{block.type === 'bullet' && <span className="bullet">•</span>}{block.type === 'todo' && <input className="check" type="checkbox" checked={Boolean(block.checked)} onChange={(e) => update((draft) => { getDocument(draft).blocks.find((x) => x.id === block.id).checked = e.target.checked; return draft })}/>} {block.type === 'callout' && <span className="callout-icon">💡</span>}<Tag data-rich-block={block.id} className="block-content" style={{ textAlign: block.align || 'left', color: block.textColor || undefined }} contentEditable suppressContentEditableWarning data-placeholder="Escribe / para insertar…" dangerouslySetInnerHTML={{ __html: block.html ? sanitizeRich(block.html) : escapeHtml(block.content || '') }} onFocus={() => { activeBlock.current = block.id }} onInput={(e) => { if (e.currentTarget.innerText.trim() === '/') openMenu(e.currentTarget) }} onKeyDown={handleKeys} onBlur={(e) => updateContent(e.currentTarget)}/>{controls}</div>
+  return <div className={`note-block type-${block.type}`}><GripVertical className="block-grip" size={15}/>{block.type === 'bullet' && <span className="bullet">•</span>}{block.type === 'numbered' && <span className="numbered-marker">{listNumber}.</span>}{block.type === 'todo' && <input className="check" type="checkbox" checked={Boolean(block.checked)} onChange={(e) => update((draft) => { getDocument(draft).blocks.find((x) => x.id === block.id).checked = e.target.checked; return draft })}/>} {block.type === 'callout' && <span className="callout-icon">💡</span>}<Tag data-rich-block={block.id} className="block-content" style={{ textAlign: block.align || 'left', color: block.textColor || undefined }} contentEditable suppressContentEditableWarning data-placeholder="Escribe / para insertar…" dangerouslySetInnerHTML={{ __html: block.html ? sanitizeRich(block.html) : escapeHtml(block.content || '') }} onFocus={() => { activeBlock.current = block.id }} onInput={(e) => { if (e.currentTarget.innerText.trim() === '/') openMenu(e.currentTarget) }} onKeyDown={handleKeys} onBlur={(e) => updateContent(e.currentTarget)}/>{controls}</div>
 }
 
 function createTableData() {
   return {
     name: 'Registro',
+    width: 960,
     columns: [
       { id: uid(), name: 'Nombre', type: 'text' },
       { id: uid(), name: 'Correo o dato', type: 'text' },
@@ -1022,11 +1133,15 @@ function createTableData() {
   }
 }
 
-function SmartTable({ block, update, getDocument, controls }) {
+function SmartTable({ block, update, getDocument, controls, onRequestWide }) {
   const [query, setQuery] = useState('')
+  const viewportRef = useRef(null)
   const normalized = normalizeTableData(block, uid)
   const columns = normalized.columns
   const rows = normalized.rows
+  const minimumWidth = Math.max(760, columns.length * 180 + 80)
+  const [tableWidth, setTableWidth] = useState(() => clamp(Number(block.width) || minimumWidth, 680, 2800))
+  useEffect(() => { setTableWidth((current) => Math.max(current, clamp(Number(block.width) || minimumWidth, 680, 2800))) }, [block.width, minimumWidth])
   const filteredRows = rows.map((row, index) => ({ row, index })).filter(({ row }) => !query || row.some((cell) => String(cell ?? '').toLowerCase().includes(query.toLowerCase())))
   const mutate = (change) => update((draft) => {
     const target = getDocument(draft).blocks.find((item) => item.id === block.id)
@@ -1040,7 +1155,29 @@ function SmartTable({ block, update, getDocument, controls }) {
   })
   const updateCell = (rowIndex, columnIndex, value) => mutate((table) => { table.rows[rowIndex][columnIndex] = value })
   const addRow = () => mutate((table) => { table.rows.push(Array(table.columns.length).fill('')) })
-  const addColumn = () => mutate((table) => { table.columns.push({ id: uid(), name: `Columna ${table.columns.length + 1}`, type: 'text' }); table.rows.forEach((row) => row.push('')) })
+  const requestSpaceIfNeeded = (width) => { if (width > (viewportRef.current?.clientWidth || window.innerWidth - 160)) onRequestWide?.() }
+  const persistWidth = (width) => { const next = clamp(Math.round(width), 680, 2800); setTableWidth(next); requestSpaceIfNeeded(next); mutate((table) => { table.width = next }) }
+  const changeWidth = (amount) => persistWidth(tableWidth + amount)
+  const resizeTable = (event) => {
+    event.preventDefault()
+    const startX = event.clientX
+    const startWidth = tableWidth
+    onRequestWide?.()
+    const move = (pointer) => setTableWidth(clamp(startWidth + pointer.clientX - startX, 680, 2800))
+    const up = (pointer) => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      persistWidth(startWidth + pointer.clientX - startX)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
+  const addColumn = () => {
+    const nextWidth = Math.max(tableWidth + 180, (columns.length + 1) * 180 + 80)
+    setTableWidth(clamp(nextWidth, 680, 2800))
+    requestSpaceIfNeeded(nextWidth)
+    mutate((table) => { table.width = clamp(nextWidth, 680, 2800); table.columns.push({ id: uid(), name: `Columna ${table.columns.length + 1}`, type: 'text' }); table.rows.forEach((row) => row.push('')) })
+  }
   const removeRow = (rowIndex) => mutate((table) => { if (table.rows.length > 1) table.rows.splice(rowIndex, 1); else table.rows[0] = Array(table.columns.length).fill('') })
   const removeColumn = (columnIndex) => mutate((table) => { if (table.columns.length <= 2) return; table.columns.splice(columnIndex, 1); table.rows.forEach((row) => row.splice(columnIndex, 1)) })
   const exportCsv = () => {
@@ -1060,20 +1197,27 @@ function SmartTable({ block, update, getDocument, controls }) {
     event.preventDefault()
     const grid = parsePastedGrid(text).slice(0, 500)
     if (!grid.length) return
+    const pastedColumns = columnIndex + Math.max(...grid.map((row) => row.length))
+    if (pastedColumns > columns.length) {
+      const nextWidth = clamp(Math.max(tableWidth, pastedColumns * 180 + 80), 680, 2800)
+      setTableWidth(nextWidth)
+      requestSpaceIfNeeded(nextWidth)
+    }
     mutate((table) => {
       const requiredColumns = Math.min(50, columnIndex + Math.max(...grid.map((row) => row.length)))
       while (table.columns.length < requiredColumns) table.columns.push({ id: uid(), name: `Columna ${table.columns.length + 1}`, type: 'text' })
+      table.width = clamp(Math.max(Number(table.width) || 0, requiredColumns * 180 + 80), 680, 2800)
       const requiredRows = Math.min(2000, rowIndex + grid.length)
       while (table.rows.length < requiredRows) table.rows.push(Array(table.columns.length).fill(''))
       table.rows.forEach((row) => { while (row.length < table.columns.length) row.push('') })
       grid.slice(0, requiredRows - rowIndex).forEach((pastedRow, rowOffset) => pastedRow.slice(0, requiredColumns - columnIndex).forEach((value, columnOffset) => { table.rows[rowIndex + rowOffset][columnIndex + columnOffset] = value }))
     })
   }
-  return <div className="note-block table-block"><GripVertical className="block-grip" size={15}/><div className="smart-table"><div className="table-toolbar"><input className="table-name" aria-label="Nombre de la tabla" value={block.name || 'Registro'} onChange={(event) => mutate((table) => { table.name = event.target.value })}/><span>{rows.length} registro{rows.length === 1 ? '' : 's'}</span><input className="table-search" type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar…"/><button onClick={addColumn}><Plus size={13}/> Columna</button><button onClick={exportCsv}><Download size={13}/> CSV</button></div><div className="table-scroll"><table><thead><tr><th className="row-number">#</th>{columns.map((column, columnIndex) => <th key={column.id}><input aria-label={`Nombre de columna ${columnIndex + 1}`} value={column.name} onChange={(event) => mutate((table) => { table.columns[columnIndex].name = event.target.value })}/><div><select aria-label={`Tipo de ${column.name}`} value={column.type || 'text'} onChange={(event) => mutate((table) => { table.columns[columnIndex].type = event.target.value })}><option value="text">Texto</option><option value="number">Número</option><option value="currency">Moneda</option><option value="date">Fecha</option><option value="checkbox">Sí / No</option></select><button title="Eliminar columna" disabled={columns.length <= 2} onClick={() => removeColumn(columnIndex)}>×</button></div></th>)}<th className="row-actions"/></tr></thead><tbody>{filteredRows.map(({ row, index: rowIndex }) => <tr key={rowIndex}><th className="row-number">{rowIndex + 1}</th>{columns.map((column, columnIndex) => <td key={column.id}>{column.type === 'checkbox' ? <input data-table={block.id} data-row={rowIndex} data-column={columnIndex} className="table-check" type="checkbox" checked={row[columnIndex] === true || row[columnIndex] === 'true'} onChange={(event) => updateCell(rowIndex, columnIndex, event.target.checked)}/> : <input data-table={block.id} data-row={rowIndex} data-column={columnIndex} type={column.type === 'date' ? 'date' : 'text'} inputMode={column.type === 'number' || column.type === 'currency' ? 'decimal' : undefined} value={row[columnIndex] ?? ''} placeholder={columnIndex === 0 ? 'Nuevo registro' : ''} onChange={(event) => updateCell(rowIndex, columnIndex, event.target.value)} onPaste={(event) => pasteGrid(event, rowIndex, columnIndex)} onKeyDown={(event) => focusNextRow(event, rowIndex, columnIndex)}/>}</td>)}<td className="row-actions"><button title="Eliminar fila" onClick={() => removeRow(rowIndex)}>×</button></td></tr>)}{!filteredRows.length && <tr><td className="table-no-results" colSpan={columns.length + 2}>No hay registros que coincidan.</td></tr>}</tbody><tfoot><tr><th className="row-number">Σ</th>{columns.map((column, columnIndex) => { if (column.type !== 'number' && column.type !== 'currency') return <td key={column.id}><span>{rows.filter((row) => String(row[columnIndex] ?? '').trim()).length || '—'}</span></td>; const values = rows.map((row) => parseLocalizedNumber(row[columnIndex])).filter((value) => value !== null); const total = values.reduce((sum, value) => sum + value, 0); return <td key={column.id}><strong>{formatNumber(total, column.type === 'currency')}</strong><small>Prom. {formatNumber(total / Math.max(values.length, 1), column.type === 'currency')}</small></td> })}<td/></tr></tfoot></table></div><button className="table-add" onClick={addRow}><Plus size={13}/> Añadir registro</button></div>{controls}</div>
+  return <div className="note-block table-block" ref={viewportRef}><GripVertical className="block-grip" size={15}/><div className="table-viewport"><div className="smart-table" style={{ '--table-width': `${tableWidth}px` }}><div className="table-toolbar"><input className="table-name" aria-label="Nombre de la tabla" value={block.name || 'Registro'} onChange={(event) => mutate((table) => { table.name = event.target.value })}/><span>{rows.length} registro{rows.length === 1 ? '' : 's'}</span><input className="table-search" type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar…"/><div className="table-width-control" aria-label="Ancho de la tabla"><button aria-label="Reducir ancho" title="Reducir ancho" onClick={() => changeWidth(-160)}>−</button><span>{tableWidth}px</span><button aria-label="Ampliar ancho" title="Ampliar ancho" onClick={() => changeWidth(160)}>＋</button></div><button onClick={addColumn}><Plus size={13}/> Columna</button><button onClick={exportCsv}><Download size={13}/> CSV</button></div><div className="table-scroll"><table><thead><tr><th className="row-number">#</th>{columns.map((column, columnIndex) => <th key={column.id}><input aria-label={`Nombre de columna ${columnIndex + 1}`} value={column.name} onChange={(event) => mutate((table) => { table.columns[columnIndex].name = event.target.value })}/><div><select aria-label={`Tipo de ${column.name}`} value={column.type || 'text'} onChange={(event) => mutate((table) => { table.columns[columnIndex].type = event.target.value })}><option value="text">Texto</option><option value="number">Número</option><option value="currency">Moneda</option><option value="date">Fecha</option><option value="checkbox">Sí / No</option></select><button title="Eliminar columna" disabled={columns.length <= 2} onClick={() => removeColumn(columnIndex)}>×</button></div></th>)}<th className="row-actions"/></tr></thead><tbody>{filteredRows.map(({ row, index: rowIndex }) => <tr key={rowIndex}><th className="row-number">{rowIndex + 1}</th>{columns.map((column, columnIndex) => <td key={column.id}>{column.type === 'checkbox' ? <input data-table={block.id} data-row={rowIndex} data-column={columnIndex} className="table-check" type="checkbox" checked={row[columnIndex] === true || row[columnIndex] === 'true'} onChange={(event) => updateCell(rowIndex, columnIndex, event.target.checked)}/> : <input data-table={block.id} data-row={rowIndex} data-column={columnIndex} type={column.type === 'date' ? 'date' : 'text'} inputMode={column.type === 'number' || column.type === 'currency' ? 'decimal' : undefined} value={row[columnIndex] ?? ''} placeholder={columnIndex === 0 ? 'Nuevo registro' : ''} onChange={(event) => updateCell(rowIndex, columnIndex, event.target.value)} onPaste={(event) => pasteGrid(event, rowIndex, columnIndex)} onKeyDown={(event) => focusNextRow(event, rowIndex, columnIndex)}/>}</td>)}<td className="row-actions"><button title="Eliminar fila" onClick={() => removeRow(rowIndex)}>×</button></td></tr>)}{!filteredRows.length && <tr><td className="table-no-results" colSpan={columns.length + 2}>No hay registros que coincidan.</td></tr>}</tbody><tfoot><tr><th className="row-number">Σ</th>{columns.map((column, columnIndex) => { if (column.type !== 'number' && column.type !== 'currency') return <td key={column.id}><span>{rows.filter((row) => String(row[columnIndex] ?? '').trim()).length || '—'}</span></td>; const values = rows.map((row) => parseLocalizedNumber(row[columnIndex])).filter((value) => value !== null); const total = values.reduce((sum, value) => sum + value, 0); return <td key={column.id}><strong>{formatNumber(total, column.type === 'currency')}</strong><small>Prom. {formatNumber(total / Math.max(values.length, 1), column.type === 'currency')}</small></td> })}<td/></tr></tfoot></table></div><button className="table-add" onClick={addRow}><Plus size={13}/> Añadir registro</button><div className="table-resize-handle" role="separator" aria-label="Cambiar ancho de la tabla" aria-orientation="vertical" onPointerDown={resizeTable}/></div></div>{controls}</div>
 }
 
 const blockOptions = [
-  ['text', '¶', 'Texto', 'Párrafo sencillo'], ['h1', 'H1', 'Título', 'Encabezado principal'], ['h2', 'H2', 'Subtítulo', 'Encabezado secundario'], ['bullet', '•', 'Lista', 'Lista con viñetas'], ['todo', '☐', 'Tarea', 'Casilla dentro del documento'], ['quote', '❝', 'Cita', 'Destaca una frase'], ['callout', '💡', 'Aviso', 'Bloque destacado'], ['table', '▦', 'Tabla de datos', 'Registros, tipos y cálculos simples'], ['divider', '―', 'Separador', 'Divide secciones'],
+  ['text', '¶', 'Texto', 'Párrafo sencillo'], ['h1', 'H1', 'Título', 'Encabezado principal'], ['h2', 'H2', 'Subtítulo', 'Encabezado secundario'], ['bullet', '•', 'Lista', 'Lista con viñetas'], ['numbered', '1.', 'Lista numerada', 'Numeración automática'], ['todo', '☐', 'Tarea', 'Casilla dentro del documento'], ['quote', '❝', 'Cita', 'Destaca una frase'], ['callout', '💡', 'Aviso', 'Bloque destacado'], ['table', '▦', 'Tabla de datos', 'Registros, tipos y cálculos simples'], ['divider', '―', 'Separador', 'Divide secciones'],
 ]
 function BlockMenu({ position, add, close }) { useEffect(() => { const handler = (e) => { if (!e.target.closest('.editor-popover')) close() }; const timer = setTimeout(() => document.addEventListener('pointerdown', handler), 0); return () => { clearTimeout(timer); document.removeEventListener('pointerdown', handler) } }, [close]); return <div className="editor-popover" style={{ left: Math.max(8, Math.min(position.x, innerWidth - 310)), top: Math.max(8, Math.min(position.y, innerHeight - 420)) }}>{blockOptions.map(([type, icon, label, help]) => <button key={type} onClick={() => add(type)}><span>{icon}</span><b>{label}</b><small>{help}</small></button>)}</div> }
 
@@ -1181,4 +1325,5 @@ function escapeXml(value = '') { return String(value).replace(/[<>&"']/g, (chara
 function formatBytes(bytes) { if (!bytes) return '0 B'; const units = ['B', 'KB', 'MB', 'GB']; const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1); return `${(bytes / (1024 ** index)).toFixed(index ? 1 : 0)} ${units[index]}` }
 function escapeHtml(text = '') { return String(text).replace(/[&<>"]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[character]) }
 function sanitizeRich(html = '') { const template = document.createElement('template'); template.innerHTML = html; const allowed = new Set(['B', 'STRONG', 'I', 'EM', 'U', 'S', 'STRIKE', 'A', 'BR', 'DIV', 'P', 'SPAN']); [...template.content.querySelectorAll('*')].reverse().forEach((element) => { if (!allowed.has(element.tagName)) { element.replaceWith(document.createTextNode(element.textContent || '')); return } [...element.attributes].forEach((attribute) => { if (element.tagName === 'A' && attribute.name === 'href' && /^https?:\/\//i.test(attribute.value)) return; element.removeAttribute(attribute.name) }); if (element.tagName === 'A' && element.hasAttribute('href')) { element.target = '_blank'; element.rel = 'noopener' } }); return template.innerHTML }
+
 
