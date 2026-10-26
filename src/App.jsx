@@ -10,6 +10,7 @@ import { getAuthRedirectUrl, supabase, supabaseConfigured } from './lib/supabase
 import { layoutCalendarEvents } from './calendarLayout'
 import { COLORS, DAYS, initialWorkspace, iso, localDateKey, migrateWorkspace, parseWorkspaceCache, uid } from './state'
 import { normalizeTableData, parseLocalizedNumber, parsePastedGrid, tableToCsv } from './tableUtils'
+import { createTicketGridData, normalizeTicketGrid, resizeTicketGrid, ticketNumber, TICKET_GRID_LIMITS } from './ticketGridUtils'
 import { automaticBlockType, continuationBlockType, numberedBlockPosition } from './editorUtils'
 import { diffEntityCollection, entitiesFromRows, entityTable, mergeEntityChange, normalizedEntityKeys, snapshotEntities, stripNormalizedEntities } from './entitySync'
 import { defaultNotificationSettings, dueBrowserReminders, pruneSentReminderKeys, reminderItems } from './notificationUtils'
@@ -926,17 +927,24 @@ function WorkspaceFiles({ space, canEdit, session }) {
 
 function Notes({ workspace, update, pageId = null, onRequestWide }) {
   const [menu, setMenu] = useState(null)
+  const [ticketSetup, setTicketSetup] = useState(null)
   const [coverOpen, setCoverOpen] = useState(false)
   const activeBlock = useRef(null)
-  useEffect(() => { setCoverOpen(false); setMenu(null) }, [pageId])
+  useEffect(() => { setCoverOpen(false); setMenu(null); setTicketSetup(null) }, [pageId])
   const doc = pageId ? workspace.pages.find((page) => page.id === pageId) : workspace.document
   if (!doc) return <Empty text="Esta página ya no existe."/>
   const blocks = doc.blocks
   const getDocument = (draft) => pageId ? draft.pages.find((page) => page.id === pageId) : draft.document
-  const addBlock = (type, after = menu?.after) => {
+  const addBlock = (type, after = menu?.after, configuration = null) => {
+    if (type === 'ticketGrid' && !configuration) {
+      setTicketSetup({ after })
+      setMenu(null)
+      return
+    }
     const block = { id: uid(), type, content: '' }
     if (type === 'todo') block.checked = false
     if (type === 'table') Object.assign(block, createTableData())
+    if (type === 'ticketGrid') Object.assign(block, createTicketGridData(configuration.rows, configuration.columns, configuration.startNumber))
     update((draft) => { const target = getDocument(draft); const index = after ? target.blocks.findIndex((x) => x.id === after) + 1 : target.blocks.length; const slash = target.blocks.find((x) => x.id === after); if (slash?.content?.trim() === '/') { slash.content = ''; slash.html = '' } target.blocks.splice(index, 0, block); return draft })
     setMenu(null); setTimeout(() => document.querySelector(`[data-rich-block="${block.id}"]`)?.focus(), 0)
   }
@@ -968,10 +976,22 @@ function Notes({ workspace, update, pageId = null, onRequestWide }) {
       <div className="format-bar"><select className="format-select" aria-label="Estilo de texto" defaultValue="text" onChange={(e) => patchActiveBlock({ type: e.target.value })}><option value="text">Texto</option><option value="h1">Título</option><option value="h2">Subtítulo</option><option value="bullet">Lista con viñetas</option><option value="numbered">Lista numerada</option><option value="quote">Cita</option><option value="callout">Aviso</option></select><span className="format-separator"/><FormatButton title="Negrita" onClick={() => format('bold')}><Bold size={15}/></FormatButton><FormatButton title="Cursiva" onClick={() => format('italic')}><Italic size={15}/></FormatButton><FormatButton title="Subrayado" onClick={() => format('underline')}><Underline size={15}/></FormatButton><FormatButton title="Tachado" onClick={() => format('strikeThrough')}>S̶</FormatButton><span className="format-separator"/><FormatButton title="Alinear a la izquierda" onClick={() => patchActiveBlock({ align: 'left' })}>≡</FormatButton><FormatButton title="Centrar" onClick={() => patchActiveBlock({ align: 'center' })}>≣</FormatButton><FormatButton title="Alinear a la derecha" onClick={() => patchActiveBlock({ align: 'right' })}>≡</FormatButton><label className="text-color" title="Color del texto"><input type="color" defaultValue="#24251f" onChange={(e) => patchActiveBlock({ textColor: e.target.value })}/></label><FormatButton title="Enlace" onClick={() => format('createLink')}><LinkIcon size={15}/> Enlace</FormatButton><FormatButton title="Limpiar formato" onClick={() => { format('removeFormat'); patchActiveBlock({ align: 'left', textColor: '' }) }}>Tx</FormatButton><button className="insert-main" onClick={(e) => setMenu({ x: e.clientX, y: e.clientY + 12, after: null })}><Plus size={14}/> Insertar bloque</button></div>
       <div className="notion-editor">{blocks.map((block, index) => <RichBlock key={block.id} block={block} listNumber={numberedBlockPosition(blocks, index)} update={update} activeBlock={activeBlock} getDocument={getDocument} onRequestWide={onRequestWide} openMenu={(element) => { const rect = element.getBoundingClientRect(); setMenu({ x: rect.left, y: rect.bottom + 6, after: block.id }) }}/>)}</div>
       <button className="add-last" onClick={() => addBlock('text', blocks.at(-1)?.id)}><Plus size={14}/> Añadir bloque</button>
-    </article>{menu && <BlockMenu position={menu} add={addBlock} close={() => setMenu(null)}/>}</div>
+    </article>{menu && <BlockMenu position={menu} add={addBlock} close={() => setMenu(null)}/>} {ticketSetup && <TicketGridSetup close={() => setTicketSetup(null)} create={(configuration) => { addBlock('ticketGrid', ticketSetup.after, configuration); setTicketSetup(null) }}/>}</div>
 }
 
 function CoverPicker({ value, setValue, close }) { const [url, setUrl] = useState(value?.startsWith('http') ? value : ''); return <div className="cover-picker"><div className="cover-picker-head"><strong>Elegir portada</strong><button className="icon-action" aria-label="Cerrar selector de portada" onClick={close}><X size={16}/></button></div><div className="cover-swatches"><button className="cover-swatch sunset" aria-label="Portada atardecer" onClick={() => setValue('sunset')}/><button className="cover-swatch ocean" aria-label="Portada océano" onClick={() => setValue('ocean')}/><button className="cover-swatch forest" aria-label="Portada bosque" onClick={() => setValue('forest')}/></div><div className="cover-url"><input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="Pega la URL de una imagen…"/><button className="ghost" disabled={!/^https?:\/\//i.test(url)} onClick={() => setValue(url)}>Usar imagen</button>{value && <button className="ghost danger" onClick={() => setValue('')}>Quitar</button>}</div></div> }
+
+function TicketGridSetup({ close, create }) {
+  const [rows, setRows] = useState(5)
+  const [columns, setColumns] = useState(10)
+  const total = rows * columns
+  return <FormModal title="Nueva tabla de entradas" close={close} onSubmit={(form) => create({ rows: form.get('rows'), columns: form.get('columns'), startNumber: form.get('startNumber') })}>
+    <p className="ticket-setup-copy">Elige la cuadrícula. Cada casilla se numerará automáticamente y podrás marcarla como reservada con un clic.</p>
+    <div className="field-row"><Field label="Filas"><input name="rows" type="number" min="1" max={TICKET_GRID_LIMITS.rows} value={rows} onChange={(event) => setRows(clamp(Number(event.target.value) || 1, 1, TICKET_GRID_LIMITS.rows))} required/></Field><Field label="Columnas"><input name="columns" type="number" min="1" max={TICKET_GRID_LIMITS.columns} value={columns} onChange={(event) => setColumns(clamp(Number(event.target.value) || 1, 1, TICKET_GRID_LIMITS.columns))} required/></Field></div>
+    <Field label="Comenzar numeración en"><input name="startNumber" type="number" min="1" max="999999" defaultValue="1" required/></Field>
+    <div className="ticket-setup-summary"><Grid3X3 size={18}/><div><strong>{rows} × {columns}</strong><span>{total} entrada{total === 1 ? '' : 's'} numerada{total === 1 ? '' : 's'}</span></div></div>
+  </FormModal>
+}
 
 function PageRelations({ page, workspace, update }) {
   const addRelation = (key, value) => { if (!value) return; update((draft) => { const target = draft.pages.find((x) => x.id === page.id); if (!target[key].includes(value)) target[key].push(value); return draft }) }
@@ -1116,8 +1136,37 @@ function RichBlock({ block, listNumber, update, activeBlock, openMenu, getDocume
   const controls = <div className="block-controls"><button title="Subir bloque" onClick={() => move(-1)}><ArrowUp size={13}/></button><button title="Bajar bloque" onClick={() => move(1)}><ArrowDown size={13}/></button><button title="Duplicar bloque" onClick={duplicate}><Copy size={13}/></button><button className="danger" title="Eliminar bloque" onClick={remove}><Trash2 size={13}/></button></div>
   if (block.type === 'divider') return <div className="note-block divider-block"><GripVertical className="block-grip" size={15}/><hr/>{controls}</div>
   if (block.type === 'table') return <SmartTable block={block} update={update} getDocument={getDocument} controls={controls} onRequestWide={onRequestWide}/>
+  if (block.type === 'ticketGrid') return <TicketGrid block={block} update={update} getDocument={getDocument} controls={controls} onRequestWide={onRequestWide}/>
   const Tag = block.type === 'h1' ? 'h2' : block.type === 'h2' ? 'h3' : 'div'
   return <div className={`note-block type-${block.type}`}><GripVertical className="block-grip" size={15}/>{block.type === 'bullet' && <span className="bullet">•</span>}{block.type === 'numbered' && <span className="numbered-marker">{listNumber}.</span>}{block.type === 'todo' && <input className="check" type="checkbox" checked={Boolean(block.checked)} onChange={(e) => update((draft) => { getDocument(draft).blocks.find((x) => x.id === block.id).checked = e.target.checked; return draft })}/>} {block.type === 'callout' && <span className="callout-icon">💡</span>}<Tag data-rich-block={block.id} className="block-content" style={{ textAlign: block.align || 'left', color: block.textColor || undefined }} contentEditable suppressContentEditableWarning data-placeholder="Escribe / para insertar…" dangerouslySetInnerHTML={{ __html: block.html ? sanitizeRich(block.html) : escapeHtml(block.content || '') }} onFocus={() => { activeBlock.current = block.id }} onInput={(e) => { if (e.currentTarget.innerText.trim() === '/') openMenu(e.currentTarget) }} onKeyDown={handleKeys} onBlur={(e) => updateContent(e.currentTarget)}/>{controls}</div>
+}
+
+function TicketGrid({ block, update, getDocument, controls, onRequestWide }) {
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const grid = normalizeTicketGrid(block)
+  const reservedCount = grid.ticketCells.filter((cell) => cell.reserved).length
+  const total = grid.ticketCells.length
+  useEffect(() => { if (grid.ticketColumns > 8) onRequestWide?.() }, [grid.ticketColumns, onRequestWide])
+  const mutate = (change) => update((draft) => {
+    const target = getDocument(draft).blocks.find((item) => item.id === block.id)
+    if (!target) return draft
+    Object.assign(target, normalizeTicketGrid(target))
+    change(target)
+    return draft
+  })
+  const patch = (changes) => mutate((target) => Object.assign(target, changes))
+  const resize = (rows, columns) => mutate((target) => Object.assign(target, resizeTicketGrid(target, rows, columns)))
+  const toggleCell = (index) => mutate((target) => { target.ticketCells[index].reserved = !target.ticketCells[index].reserved })
+  const updateCell = (index, changes) => mutate((target) => Object.assign(target.ticketCells[index], changes))
+  return <div className="note-block ticket-grid-block"><GripVertical className="block-grip" size={15}/><section className="ticket-grid-shell">
+    <header className="ticket-grid-toolbar"><input className="ticket-grid-name" aria-label="Nombre de la tabla de entradas" value={grid.name} onChange={(event) => patch({ name: event.target.value })}/><div className="ticket-grid-progress" aria-label={`${reservedCount} de ${total} entradas reservadas`}><span><i style={{ width: `${total ? reservedCount / total * 100 : 0}%` }}/></span><b>{reservedCount}/{total}</b> reservadas</div><button className={settingsOpen ? 'active' : ''} onClick={() => setSettingsOpen((value) => !value)}><Settings size={14}/> Ajustes</button></header>
+    {settingsOpen && <div className="ticket-grid-settings"><Field label="Filas"><input type="number" min="1" max={TICKET_GRID_LIMITS.rows} value={grid.ticketRows} onChange={(event) => resize(event.target.value, grid.ticketColumns)}/></Field><Field label="Columnas"><input type="number" min="1" max={TICKET_GRID_LIMITS.columns} value={grid.ticketColumns} onChange={(event) => resize(grid.ticketRows, event.target.value)}/></Field><Field label="Número inicial"><input type="number" min="1" max="999999" value={grid.startNumber} onChange={(event) => patch({ startNumber: clamp(Number(event.target.value) || 1, 1, 999999) })}/></Field><label className="ticket-color-setting"><span>Disponible</span><input type="color" value={grid.availableColor} onChange={(event) => patch({ availableColor: event.target.value })}/></label><label className="ticket-color-setting"><span>Reservado</span><input type="color" value={grid.reservedColor} onChange={(event) => patch({ reservedColor: event.target.value })}/></label><label className="ticket-color-setting"><span>Texto</span><input type="color" value={grid.textColor} onChange={(event) => patch({ textColor: event.target.value })}/></label></div>}
+    <div className="ticket-grid-viewport"><div className="ticket-grid" style={{ '--ticket-columns': grid.ticketColumns, '--ticket-min-width': `${Math.max(560, grid.ticketColumns * 88)}px` }}>{grid.ticketCells.map((cell, index) => {
+      const background = cell.color || (cell.reserved ? grid.reservedColor : grid.availableColor)
+      return <div className={`ticket-cell ${cell.reserved ? 'reserved' : ''}`} style={{ background, color: grid.textColor }} aria-label={`Entrada ${ticketNumber(grid, index)}${cell.reserved ? ', reservada' : ', disponible'}`} tabIndex="0" key={index} onClick={() => toggleCell(index)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggleCell(index) } }}><strong>{ticketNumber(grid, index)}</strong><input type="text" aria-label={`Texto de la entrada ${ticketNumber(grid, index)}`} value={cell.text} maxLength="120" placeholder="Añadir texto" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()} onChange={(event) => updateCell(index, { text: event.target.value })}/><label className="ticket-cell-color" title="Color de esta casilla" onClick={(event) => event.stopPropagation()}><input type="color" aria-label={`Color de la entrada ${ticketNumber(grid, index)}`} value={cell.color || background} onChange={(event) => updateCell(index, { color: event.target.value })}/></label><button className="ticket-status-toggle" aria-pressed={cell.reserved} aria-label={`${cell.reserved ? 'Liberar' : 'Reservar'} entrada ${ticketNumber(grid, index)}`} onClick={(event) => { event.stopPropagation(); toggleCell(index) }}>{cell.reserved ? 'Reservada' : 'Disponible'}</button></div>
+    })}</div></div>
+    <footer className="ticket-grid-legend"><span><i style={{ background: grid.availableColor }}/> Disponible</span><span><i style={{ background: grid.reservedColor }}/> Reservada</span><small>Haz clic en una casilla para cambiar su estado.</small></footer>
+  </section>{controls}</div>
 }
 
 function createTableData() {
@@ -1217,7 +1266,7 @@ function SmartTable({ block, update, getDocument, controls, onRequestWide }) {
 }
 
 const blockOptions = [
-  ['text', '¶', 'Texto', 'Párrafo sencillo'], ['h1', 'H1', 'Título', 'Encabezado principal'], ['h2', 'H2', 'Subtítulo', 'Encabezado secundario'], ['bullet', '•', 'Lista', 'Lista con viñetas'], ['numbered', '1.', 'Lista numerada', 'Numeración automática'], ['todo', '☐', 'Tarea', 'Casilla dentro del documento'], ['quote', '❝', 'Cita', 'Destaca una frase'], ['callout', '💡', 'Aviso', 'Bloque destacado'], ['table', '▦', 'Tabla de datos', 'Registros, tipos y cálculos simples'], ['divider', '―', 'Separador', 'Divide secciones'],
+  ['text', '¶', 'Texto', 'Párrafo sencillo'], ['h1', 'H1', 'Título', 'Encabezado principal'], ['h2', 'H2', 'Subtítulo', 'Encabezado secundario'], ['bullet', '•', 'Lista', 'Lista con viñetas'], ['numbered', '1.', 'Lista numerada', 'Numeración automática'], ['todo', '☐', 'Tarea', 'Casilla dentro del documento'], ['quote', '❝', 'Cita', 'Destaca una frase'], ['callout', '💡', 'Aviso', 'Bloque destacado'], ['table', '▦', 'Tabla de datos', 'Registros, tipos y cálculos simples'], ['ticketGrid', '▦', 'Tabla de entradas', 'Números disponibles y reservados'], ['divider', '―', 'Separador', 'Divide secciones'],
 ]
 function BlockMenu({ position, add, close }) { useEffect(() => { const handler = (e) => { if (!e.target.closest('.editor-popover')) close() }; const timer = setTimeout(() => document.addEventListener('pointerdown', handler), 0); return () => { clearTimeout(timer); document.removeEventListener('pointerdown', handler) } }, [close]); return <div className="editor-popover" style={{ left: Math.max(8, Math.min(position.x, innerWidth - 310)), top: Math.max(8, Math.min(position.y, innerHeight - 420)) }}>{blockOptions.map(([type, icon, label, help]) => <button key={type} onClick={() => add(type)}><span>{icon}</span><b>{label}</b><small>{help}</small></button>)}</div> }
 
@@ -1235,7 +1284,7 @@ function ModalController({ modal, close, workspace, update, moveToTrash, session
   if (modal.type === 'project') return <FormModal title="Nuevo proyecto" close={close} onSubmit={(form) => { update((draft) => { draft.projects.unshift({ id: uid(), name: form.get('name'), description: form.get('description'), symbol: form.get('symbol'), taskIds: [] }); return draft }); close() }}><Field label="Nombre"><input name="name" required autoFocus/></Field><Field label="Descripción"><textarea name="description" rows="3"/></Field><Field label="Símbolo"><select name="symbol"><option>◎</option><option>◇</option><option>↗</option><option>✦</option></select></Field></FormModal>
   if (modal.type === 'event') { const item = modal.item ?? modal.draft ?? {}; return <FormModal title={modal.item ? 'Editar bloque' : 'Nuevo bloque'} close={close} onSubmit={(form) => { const date = form.get('date'); const values = { title: form.get('title'), date, day: dayIndex(parseDate(date)), color: form.get('color'), start: toMinutes(form.get('start')), duration: Number(form.get('duration')) }; update((draft) => { if (modal.item) Object.assign(draft.events.find((x) => x.id === modal.item.id), values); else draft.events.push({ id: uid(), ...values }); return draft }); close() }} extra={modal.item && <button type="button" className="ghost danger" onClick={() => { close(); setTimeout(() => {}, 0); moveToTrash('event', modal.item) }}>Mover a papelera</button>}><Field label="Título"><input name="title" required autoFocus defaultValue={item.title || ''}/></Field><div className="field-row"><Field label="Fecha"><input type="date" name="date" defaultValue={item.date || iso()} required/></Field><Field label="Color"><select name="color" defaultValue={item.color || 'blue'}>{COLORS.map((color) => <option key={color} value={color}>{colorNames[color]}</option>)}</select></Field></div><div className="field-row"><Field label="Inicio"><input type="time" name="start" defaultValue={clock(item.start ?? 540)} required/></Field><Field label="Duración"><select name="duration" defaultValue={item.duration ?? 60}><option value="30">30 min</option><option value="45">45 min</option><option value="60">1 hora</option><option value="90">1 h 30</option><option value="120">2 horas</option><option value="180">3 horas</option><option value="240">4 horas</option></select></Field></div></FormModal> }
   if (modal.type === 'delete') return <ConfirmModal close={close} confirm={() => { moveToTrash(modal.itemType, modal.item); close() }} title="Mover a la papelera">¿Quieres mover <strong>{modal.item.title || modal.item.name}</strong> a la papelera?</ConfirmModal>
-  if (modal.type === 'noteBlock') return <FormModal title="Nuevo bloque" close={close} onSubmit={(form) => { const type = form.get('type'); const block = { id: uid(), type, content: '' }; if (type === 'todo') block.checked = false; if (type === 'table') Object.assign(block, createTableData()); update((draft) => { draft.document.blocks.push(block); return draft }); close() }}><Field label="Tipo de bloque"><select name="type" autoFocus>{blockOptions.map(([type, icon, label]) => <option key={type} value={type}>{icon} {label}</option>)}</select></Field></FormModal>
+  if (modal.type === 'noteBlock') return <FormModal title="Nuevo bloque" close={close} onSubmit={(form) => { const type = form.get('type'); const block = { id: uid(), type, content: '' }; if (type === 'todo') block.checked = false; if (type === 'table') Object.assign(block, createTableData()); if (type === 'ticketGrid') Object.assign(block, createTicketGridData(form.get('ticketRows'), form.get('ticketColumns'), form.get('startNumber'))); update((draft) => { draft.document.blocks.push(block); return draft }); close() }}><Field label="Tipo de bloque"><select name="type" autoFocus>{blockOptions.map(([type, icon, label]) => <option key={type} value={type}>{icon} {label}</option>)}</select></Field><div className="ticket-modal-options"><small>Si eliges “Tabla de entradas”:</small><div className="field-row"><Field label="Filas"><input name="ticketRows" type="number" min="1" max={TICKET_GRID_LIMITS.rows} defaultValue="5"/></Field><Field label="Columnas"><input name="ticketColumns" type="number" min="1" max={TICKET_GRID_LIMITS.columns} defaultValue="10"/></Field></div><Field label="Número inicial"><input name="startNumber" type="number" min="1" max="999999" defaultValue="1"/></Field></div></FormModal>
   if (modal.type === 'createSpace') return <WorkspaceActionModal title="Nuevo espacio de trabajo" submitLabel="Crear espacio" close={close} onSubmit={async (value) => createSpace(value)} label="Nombre del espacio" placeholder="Ej. Equipo de marketing"/>
   if (modal.type === 'joinSpace') return <WorkspaceActionModal title="Unirme a un espacio" submitLabel="Unirme" close={close} onSubmit={joinSpace} label="Código o enlace de invitación" placeholder="Pega aquí el código o el enlace"/>
   if (modal.type === 'share') return <ShareModal close={close} space={activeSpace} session={session} canEdit={canEdit}/>
